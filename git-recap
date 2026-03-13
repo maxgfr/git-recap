@@ -46,8 +46,8 @@ AI_BULLETS=""
 # Helpers
 # ==============================================================================
 
-_color() { [[ -t 2 ]] && printf '\033[%sm' "$1" >&2 || true; }
-_reset() { [[ -t 2 ]] && printf '\033[0m' >&2 || true; }
+_color() { if [[ -t 2 ]]; then printf '\033[%sm' "$1" >&2; fi; }
+_reset() { if [[ -t 2 ]]; then printf '\033[0m' >&2; fi; }
 
 info()  { _color "34"; printf ":: %s\n" "$*" >&2; _reset; }
 warn()  { _color "33"; printf "!! %s\n" "$*" >&2; _reset; }
@@ -215,8 +215,10 @@ Options:
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
   -b, --branch <branch>   Branch (default: auto-detected)
-  --provider <provider>   AI provider: claude, openai, mistral, gemini (default: claude)
-  --model <model>         AI model override (defaults: haiku for claude, gpt-4o-mini
+  --provider <provider>   AI provider: claude, claude-api, openai, mistral, gemini
+                          (default: claude)
+  --model <model>         AI model override (defaults: haiku for claude,
+                          claude-haiku-4-5-20251001 for claude-api, gpt-4o-mini
                           for openai, mistral-small-latest, gemini-2.0-flash)
   --no-ai                 Skip AI generation (summary/bullets)
   --init                  Initialize configuration
@@ -224,6 +226,7 @@ Options:
   -v, --version           Show version
 
 Environment variables:
+  ANTHROPIC_API_KEY       Required for --provider claude-api
   OPENAI_API_KEY          Required for --provider openai
   MISTRAL_API_KEY         Required for --provider mistral
   GEMINI_API_KEY          Required for --provider gemini
@@ -232,6 +235,7 @@ Examples:
   git-recap maxgfr/subtool
   git-recap -p last -f markdown -o recap.md maxgfr/subtool
   git-recap -p 2026-01 -m commits maxgfr/subtool
+  git-recap --provider claude-api maxgfr/subtool
   git-recap --provider openai --model gpt-4o maxgfr/subtool
   git-recap --provider mistral maxgfr/subtool
   git-recap --provider gemini maxgfr/subtool
@@ -286,8 +290,8 @@ validate_args() {
     esac
 
     case "$provider" in
-        claude|openai|mistral|gemini) ;;
-        *) die "Invalid provider: $provider (expected: claude, openai, mistral, gemini)" ;;
+        claude|claude-api|openai|mistral|gemini) ;;
+        *) die "Invalid provider: $provider (expected: claude, claude-api, openai, mistral, gemini)" ;;
     esac
 
     if [[ "$ARG_INIT" == false && -z "$ARG_REPO" ]]; then
@@ -347,7 +351,7 @@ config_init() {
     fi
 
     local provider=""
-    printf "AI provider (claude/openai/mistral/gemini) [claude]: " >&2
+    printf "AI provider (claude/claude-api/openai/mistral/gemini) [claude]: " >&2
     read -r provider
     [[ -z "$provider" ]] && provider="claude"
 
@@ -524,6 +528,9 @@ check_dependencies() {
                 claude)
                     command -v claude &>/dev/null || warn "claude CLI not found — AI will be skipped"
                     ;;
+                claude-api)
+                    [[ -n "${ANTHROPIC_API_KEY:-}" ]] || warn "ANTHROPIC_API_KEY not set — AI will be skipped"
+                    ;;
                 openai)
                     [[ -n "${OPENAI_API_KEY:-}" ]] || warn "OPENAI_API_KEY not set — AI will be skipped"
                     ;;
@@ -626,6 +633,22 @@ _call_openai_compatible() {
     fi
 }
 
+# Anthropic Messages API call
+_call_anthropic() {
+    local api_key="$1" model="$2" prompt="$3"
+    local escaped_prompt
+    escaped_prompt=$(printf '%s' "$prompt" | _json_escape)
+    local response
+    response=$(curl -s "https://api.anthropic.com/v1/messages" \
+        -H "Content-Type: application/json" \
+        -H "x-api-key: $api_key" \
+        -H "anthropic-version: 2023-06-01" \
+        -d "{\"model\":\"${model}\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":${escaped_prompt}}]}") || true
+    if command -v jq &>/dev/null; then
+        echo "$response" | jq -r '.content[0].text // empty' 2>/dev/null || true
+    fi
+}
+
 # Gemini API call
 _call_gemini() {
     local api_key="$1" model="$2" prompt="$3"
@@ -695,6 +718,16 @@ call_ai() {
             [[ -z "$model" ]] && model="gemini-2.0-flash"
             spinner_start "$spinner_msg"
             result=$(_call_gemini "$GEMINI_API_KEY" "$model" "$prompt") || true
+            spinner_stop
+            ;;
+        claude-api)
+            if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+                warn "ANTHROPIC_API_KEY not set — skipping AI"
+                return 1
+            fi
+            [[ -z "$model" ]] && model="claude-haiku-4-5-20251001"
+            spinner_start "$spinner_msg"
+            result=$(_call_anthropic "$ANTHROPIC_API_KEY" "$model" "$prompt") || true
             spinner_stop
             ;;
     esac

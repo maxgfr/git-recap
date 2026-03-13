@@ -15,11 +15,12 @@ Single bash script (`git-recap`, ~1100 lines) that generates monthly commit reca
 ### AI Providers
 
 - `claude` (default) — uses `claude` CLI, default model `haiku`
+- `claude-api` — Anthropic Messages API via curl, default model `claude-haiku-4-5-20251001`, needs `ANTHROPIC_API_KEY`
 - `openai` — OpenAI API via curl, default model `gpt-4o-mini`, needs `OPENAI_API_KEY`
 - `mistral` — Mistral API via curl (OpenAI-compatible), default model `mistral-small-latest`, needs `MISTRAL_API_KEY`
 - `gemini` — Google Gemini API via curl, default model `gemini-2.0-flash`, needs `GEMINI_API_KEY`
 
-Shared helpers: `_call_openai_compatible()` (openai + mistral), `_call_gemini()`, `_json_escape()` (jq or python3).
+Shared helpers: `_call_openai_compatible()` (openai + mistral), `_call_anthropic()`, `_call_gemini()`, `_json_escape()` (jq or python3).
 
 ### Commit Sources
 
@@ -39,7 +40,7 @@ Shared helpers: `_call_openai_compatible()` (openai + mistral), `_call_gemini()`
 
 ## CLI
 
-- `--provider <claude|openai|mistral|gemini>` — AI provider
+- `--provider <claude|claude-api|openai|mistral|gemini>` — AI provider
 - `--model <model>` — override default model per provider
 - `--no-ai` — skip AI entirely, raw commit messages as bullets
 - `-f <text|markdown|json>` — output format

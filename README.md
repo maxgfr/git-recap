@@ -2,7 +2,7 @@
 
 Monthly commit recap generator — AI-powered summaries, bullet points, and commit lists.
 
-Supports multiple AI providers: **Claude**, **OpenAI**, **Mistral**, **Gemini**.
+Supports multiple AI providers: **Claude** (CLI & API), **OpenAI**, **Mistral**, **Gemini**.
 
 ## Installation
 
@@ -25,6 +25,7 @@ chmod +x /usr/local/bin/git-recap
 - `gh` (GitHub CLI, authenticated)
 - One of the AI providers (optional):
   - `claude` CLI for Claude (default)
+  - `ANTHROPIC_API_KEY` env var for Claude API (without CLI)
   - `OPENAI_API_KEY` env var for OpenAI/ChatGPT
   - `MISTRAL_API_KEY` env var for Mistral
   - `GEMINI_API_KEY` env var for Gemini
@@ -45,7 +46,7 @@ Options:
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
   -b, --branch <branch>   Branch (default: auto-detected)
-  --provider <provider>   AI provider: claude, openai, mistral, gemini (default: claude)
+  --provider <provider>   AI provider: claude, claude-api, openai, mistral, gemini (default: claude)
   --model <model>         AI model override (see defaults below)
   --no-ai                 Skip AI generation (summary/bullets)
   --init                  Initialize configuration
@@ -57,7 +58,8 @@ Options:
 
 | Provider | Flag | Default Model | Requires |
 |----------|------|---------------|----------|
-| Claude | `--provider claude` | `haiku` | `claude` CLI |
+| Claude (CLI) | `--provider claude` | `haiku` | `claude` CLI |
+| Claude (API) | `--provider claude-api` | `claude-haiku-4-5-20251001` | `ANTHROPIC_API_KEY` |
 | OpenAI | `--provider openai` | `gpt-4o-mini` | `OPENAI_API_KEY` |
 | Mistral | `--provider mistral` | `mistral-small-latest` | `MISTRAL_API_KEY` |
 | Gemini | `--provider gemini` | `gemini-2.0-flash` | `GEMINI_API_KEY` |
@@ -66,6 +68,7 @@ Override the model with `--model`:
 
 ```bash
 git-recap --provider claude --model sonnet maxgfr/subtool
+git-recap --provider claude-api --model claude-sonnet-4-6 maxgfr/subtool
 git-recap --provider openai --model gpt-4o maxgfr/subtool
 git-recap --provider gemini --model gemini-1.5-pro maxgfr/subtool
 ```
@@ -81,6 +84,9 @@ git-recap -p last -f markdown -o recap.md maxgfr/subtool
 
 # Specific month, commits only
 git-recap -p 2026-01 -m commits maxgfr/subtool
+
+# Use Claude API (without CLI)
+git-recap --provider claude-api maxgfr/subtool
 
 # Use Mistral AI
 git-recap --provider mistral maxgfr/subtool

@@ -228,8 +228,9 @@ assert_contains "--help shows --no-ai" "$out" "--no-ai"
 assert_contains "--help shows --model" "$out" "--model"
 assert_contains "--help shows json format" "$out" "json"
 assert_contains "--help shows SSH example" "$out" "git@github.com"
-assert_contains "--help shows all providers" "$out" "claude, openai, mistral, gemini"
+assert_contains "--help shows all providers" "$out" "claude, claude-api, openai, mistral, gemini"
 assert_contains "--help shows env vars" "$out" "OPENAI_API_KEY"
+assert_contains "--help shows anthropic env" "$out" "ANTHROPIC_API_KEY"
 assert_contains "--help shows mistral env" "$out" "MISTRAL_API_KEY"
 assert_contains "--help shows gemini env" "$out" "GEMINI_API_KEY"
 
@@ -260,6 +261,7 @@ assert_contains "invalid provider shows error" "$err" "Invalid provider"
 
 # 7. Valid providers accepted
 assert_exit "provider claude accepted" 0 "$GIT_RECAP" --provider claude --help
+assert_exit "provider claude-api accepted" 0 "$GIT_RECAP" --provider claude-api --help
 assert_exit "provider openai accepted" 0 "$GIT_RECAP" --provider openai --help
 assert_exit "provider mistral accepted" 0 "$GIT_RECAP" --provider mistral --help
 assert_exit "provider gemini accepted" 0 "$GIT_RECAP" --provider gemini --help
