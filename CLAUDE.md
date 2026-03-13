@@ -43,9 +43,11 @@ Shared helpers: `_call_openai_compatible()` (openai + mistral), `_call_anthropic
 - `--provider <claude|claude-api|openai|mistral|gemini>` — AI provider
 - `--model <model>` — override default model per provider
 - `--no-ai` — skip AI entirely, raw commit messages as bullets
+- `--lang <en|fr|...>` — language for AI output
+- `--voice <I|we>` — narrative voice (first person or team)
 - `-f <text|markdown|json>` — output format
 - `-m <summary|commits|bullets|all>` — what to include
-- `-p <current|last|N|YYYY-MM>` — period
+- `-p <current-month|last-month|current-week|last-week|current-year|last-year|all|N|YYYY-MM|YYYY>` — period
 - Repo: owner/repo, HTTPS URL, SSH URL, local path (`.`)
 
 ## CI/CD

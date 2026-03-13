@@ -223,7 +223,7 @@ echo "$(_bold "CLI basics")"
 out=$("$GIT_RECAP" --help 2>/dev/null)
 assert_exit "--help exits 0" 0 "$GIT_RECAP" --help
 assert_contains "--help shows usage" "$out" "Usage:"
-assert_contains "--help shows options" "$out" "Options:"
+assert_contains "--help shows options" "$out" "# Options"
 assert_contains "--help shows --no-ai" "$out" "--no-ai"
 assert_contains "--help shows --model" "$out" "--model"
 assert_contains "--help shows json format" "$out" "json"

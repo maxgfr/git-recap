@@ -9,10 +9,12 @@ VERSION="1.3.0"
 CONFIG_FILE="$HOME/.git-recaprc"
 
 # Defaults
-DEFAULT_PERIOD="current"
+DEFAULT_PERIOD="current-month"
 DEFAULT_MODE="all"
 DEFAULT_FORMAT="text"
 DEFAULT_PROVIDER="claude"
+DEFAULT_LANG="en"
+DEFAULT_VOICE="I"
 
 # State
 ARG_USER=""
@@ -23,6 +25,8 @@ ARG_OUTPUT=""
 ARG_BRANCH=""
 ARG_PROVIDER=""
 ARG_MODEL=""
+ARG_LANG=""
+ARG_VOICE=""
 ARG_REPO=""
 ARG_INIT=false
 NO_AI=false
@@ -38,6 +42,8 @@ UNTIL=""
 PERIOD_LABEL=""
 PROVIDER=""
 MODEL=""
+LANG_CODE=""
+VOICE_MODE=""
 SPINNER_PID=""
 AI_SUMMARY=""
 AI_BULLETS=""
@@ -194,6 +200,31 @@ _json_escape() {
     fi
 }
 
+_lang_name() {
+    case "${1:-en}" in
+        en) echo "English" ;;
+        fr) echo "French" ;;
+        es) echo "Spanish" ;;
+        de) echo "German" ;;
+        it) echo "Italian" ;;
+        pt) echo "Portuguese" ;;
+        ja) echo "Japanese" ;;
+        zh) echo "Chinese" ;;
+        ko) echo "Korean" ;;
+        ar) echo "Arabic" ;;
+        ru) echo "Russian" ;;
+        nl) echo "Dutch" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+_voice_instruction() {
+    case "${1:-I}" in
+        I|i|je)   echo "Write from a first-person singular perspective, using 'I'. Present the work as your own accomplishments." ;;
+        we|We|nous) echo "Write from a first-person plural perspective, using 'we'. Present the work as team accomplishments." ;;
+    esac
+}
+
 # ==============================================================================
 # Help
 # ==============================================================================
@@ -205,12 +236,16 @@ git-recap — Monthly commit recap generator
 Usage:
   git-recap [OPTIONS] <repo>
 
-Arguments:
+# Arguments
+
   <repo>              GitHub URL, owner/repo, repo name, SSH URL, or local path (.)
 
-Options:
+# Options
+
   -u, --user <user>       GitHub username (auto-detected via gh)
-  -p, --period <period>   Period: current, last, <N>, YYYY-MM (default: current)
+  -p, --period <period>   Period (default: current-month). Values:
+                          current-month, last-month, current-week, last-week,
+                          current-year, last-year, all, <N>, YYYY-MM, YYYY
   -m, --mode <mode>       Mode: summary, commits, bullets, all (default: all)
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
@@ -220,30 +255,65 @@ Options:
   --model <model>         AI model override (defaults: haiku for claude,
                           claude-haiku-4-5-20251001 for claude-api, gpt-4o-mini
                           for openai, mistral-small-latest, gemini-2.0-flash)
+  --lang <lang>           Language for AI output: en, fr, es, de, ... (default: en)
+  --voice <voice>         Narrative voice: I or we (default: I)
   --no-ai                 Skip AI generation (summary/bullets)
   --init                  Initialize configuration
   -h, --help              Show this help
   -v, --version           Show version
 
-Environment variables:
+# Environment Variables
+
   ANTHROPIC_API_KEY       Required for --provider claude-api
   OPENAI_API_KEY          Required for --provider openai
   MISTRAL_API_KEY         Required for --provider mistral
   GEMINI_API_KEY          Required for --provider gemini
 
-Examples:
-  git-recap maxgfr/subtool
-  git-recap -p last -f markdown -o recap.md maxgfr/subtool
-  git-recap -p 2026-01 -m commits maxgfr/subtool
-  git-recap --provider claude-api maxgfr/subtool
-  git-recap --provider openai --model gpt-4o maxgfr/subtool
-  git-recap --provider mistral maxgfr/subtool
-  git-recap --provider gemini maxgfr/subtool
-  git-recap https://github.com/maxgfr/subtool
-  git-recap git@github.com:maxgfr/subtool.git
-  git-recap -f json -m commits maxgfr/subtool | jq .
-  git-recap --no-ai -m all maxgfr/subtool
-  git-recap .
+# Examples
+
+  ## Basic usage
+  git-recap maxgfr/subtool                            # Current month recap
+  git-recap .                                          # Local repo recap
+
+  ## Period selection (-p)
+  git-recap -p current-month maxgfr/subtool            # Current month (default)
+  git-recap -p last-month maxgfr/subtool               # Last month
+  git-recap -p current-week maxgfr/subtool             # Current week (Mon-Sun)
+  git-recap -p last-week maxgfr/subtool                # Last week
+  git-recap -p current-year maxgfr/subtool             # Current year
+  git-recap -p last-year maxgfr/subtool                # Last year
+  git-recap -p 2026-01 maxgfr/subtool                  # January 2026
+  git-recap -p 2025 maxgfr/subtool                     # Full year 2025
+  git-recap -p 3 maxgfr/subtool                        # Last 3 months
+  git-recap -p all maxgfr/subtool                      # All commits ever
+
+  ## Output format (-f) and file output (-o)
+  git-recap -f markdown -o recap.md maxgfr/subtool     # Markdown saved to file
+  git-recap -f json maxgfr/subtool | jq .              # JSON piped to jq
+
+  ## Mode selection (-m)
+  git-recap -m summary maxgfr/subtool                  # AI summary only
+  git-recap -m commits maxgfr/subtool                  # Commit list only
+  git-recap -m bullets maxgfr/subtool                  # Bullet points only
+
+  ## AI providers (--provider, --model)
+  git-recap --provider claude maxgfr/subtool           # Claude CLI (default)
+  git-recap --provider claude-api maxgfr/subtool       # Anthropic API
+  git-recap --provider openai maxgfr/subtool           # OpenAI
+  git-recap --provider openai --model gpt-4o maxgfr/subtool  # Custom model
+  git-recap --provider mistral maxgfr/subtool          # Mistral
+  git-recap --provider gemini maxgfr/subtool           # Gemini
+  git-recap --no-ai maxgfr/subtool                     # No AI, raw data only
+
+  ## Language and voice (--lang, --voice)
+  git-recap --lang fr maxgfr/subtool                   # French output
+  git-recap --lang en --voice we maxgfr/subtool        # English, team voice ("we")
+  git-recap --lang fr --voice I maxgfr/subtool         # French, first person ("I")
+
+  ## Repo formats
+  git-recap maxgfr/subtool                             # owner/repo
+  git-recap https://github.com/maxgfr/subtool          # HTTPS URL
+  git-recap git@github.com:maxgfr/subtool.git          # SSH URL
 HELP
 }
 
@@ -262,6 +332,8 @@ parse_args() {
             -b|--branch)  ARG_BRANCH="${2:?Missing value for $1}"; shift 2 ;;
             --provider)   ARG_PROVIDER="${2:?Missing value for $1}"; shift 2 ;;
             --model)      ARG_MODEL="${2:?Missing value for $1}"; shift 2 ;;
+            --lang)       ARG_LANG="${2:?Missing value for $1}"; shift 2 ;;
+            --voice)      ARG_VOICE="${2:?Missing value for $1}"; shift 2 ;;
             --no-ai)      NO_AI=true; shift ;;
             --init)       ARG_INIT=true; shift ;;
             -h|--help)    show_help; exit 0 ;;
@@ -294,6 +366,12 @@ validate_args() {
         *) die "Invalid provider: $provider (expected: claude, claude-api, openai, mistral, gemini)" ;;
     esac
 
+    local voice="${ARG_VOICE:-$DEFAULT_VOICE}"
+    case "$voice" in
+        I|i|je|we|We|nous) ;;
+        *) die "Invalid voice: $voice (expected: I or we)" ;;
+    esac
+
     if [[ "$ARG_INIT" == false && -z "$ARG_REPO" ]]; then
         die "Missing required argument: <repo>. Use -h for help."
     fi
@@ -317,6 +395,10 @@ config_load() {
                 GIT_RECAP_MODEL="${BASH_REMATCH[1]}"
             elif [[ "$_line" =~ ^GIT_RECAP_FORMAT=\"([^\"]*)\"$ ]]; then
                 GIT_RECAP_FORMAT="${BASH_REMATCH[1]}"
+            elif [[ "$_line" =~ ^GIT_RECAP_LANG=\"([^\"]*)\"$ ]]; then
+                GIT_RECAP_LANG="${BASH_REMATCH[1]}"
+            elif [[ "$_line" =~ ^GIT_RECAP_VOICE=\"([^\"]*)\"$ ]]; then
+                GIT_RECAP_VOICE="${BASH_REMATCH[1]}"
             else
                 warn "Ignoring unrecognized config line $_line_num in $CONFIG_FILE"
             fi
@@ -364,12 +446,24 @@ config_init() {
     read -r default_format
     [[ -z "$default_format" ]] && default_format="text"
 
+    local lang=""
+    printf "AI output language (en/fr/es/de/...) [en]: " >&2
+    read -r lang
+    [[ -z "$lang" ]] && lang="en"
+
+    local voice=""
+    printf "Narrative voice (I/we) [I]: " >&2
+    read -r voice
+    [[ -z "$voice" ]] && voice="I"
+
     cat > "$CONFIG_FILE" <<EOF
 # git-recap configuration
 GIT_RECAP_USER="$user"
 GIT_RECAP_PROVIDER="$provider"
 GIT_RECAP_MODEL="$ai_model"
 GIT_RECAP_FORMAT="$default_format"
+GIT_RECAP_LANG="$lang"
+GIT_RECAP_VOICE="$voice"
 EOF
 
     info "Configuration saved to $CONFIG_FILE"
@@ -383,15 +477,71 @@ compute_period() {
     local period="${ARG_PERIOD:-$DEFAULT_PERIOD}"
 
     case "$period" in
-        current|"")
+        all)
+            SINCE=""
+            UNTIL=""
+            PERIOD_LABEL="All time"
+            ;;
+        current|current-month|"")
             SINCE=$(portable_date first_of_month 0)
             UNTIL=$(portable_date first_of_next_month)
             PERIOD_LABEL=$(portable_date month_label 0)
             ;;
-        last)
+        last|last-month)
             SINCE=$(portable_date first_of_month -1)
             UNTIL=$(portable_date first_of_month 0)
             PERIOD_LABEL=$(portable_date month_label -1)
+            ;;
+        current-week)
+            if _is_gnu_date; then
+                SINCE=$(date -d "last monday" +%Y-%m-%dT00:00:00 2>/dev/null || date -d "monday" +%Y-%m-%dT00:00:00)
+                UNTIL=$(date -d "next monday" +%Y-%m-%dT00:00:00)
+            else
+                local dow
+                dow=$(date +%u)
+                local days_since_mon=$(( dow - 1 ))
+                SINCE=$(LC_ALL=C date -v-"${days_since_mon}"d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
+                local days_until_next_mon=$(( 7 - days_since_mon ))
+                UNTIL=$(LC_ALL=C date -v+"${days_until_next_mon}"d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
+            fi
+            PERIOD_LABEL="Current week"
+            ;;
+        last-week)
+            if _is_gnu_date; then
+                UNTIL=$(date -d "last monday" +%Y-%m-%dT00:00:00 2>/dev/null || date -d "monday" +%Y-%m-%dT00:00:00)
+                SINCE=$(date -d "$UNTIL -7 days" +%Y-%m-%dT00:00:00)
+            else
+                local dow
+                dow=$(date +%u)
+                local days_since_mon=$(( dow - 1 ))
+                UNTIL=$(LC_ALL=C date -v-"${days_since_mon}"d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
+                SINCE=$(LC_ALL=C date -v-"${days_since_mon}"d -v-7d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
+            fi
+            PERIOD_LABEL="Last week"
+            ;;
+        current-year)
+            if _is_gnu_date; then
+                SINCE=$(date -d "$(date +%Y)-01-01" +%Y-%m-%dT00:00:00)
+                UNTIL=$(date -d "$(($(date +%Y) + 1))-01-01" +%Y-%m-%dT00:00:00)
+            else
+                local year
+                year=$(date +%Y)
+                SINCE="${year}-01-01T00:00:00"
+                UNTIL="$((year + 1))-01-01T00:00:00"
+            fi
+            PERIOD_LABEL="$(date +%Y)"
+            ;;
+        last-year)
+            if _is_gnu_date; then
+                local last_y=$(( $(date +%Y) - 1 ))
+                SINCE=$(date -d "${last_y}-01-01" +%Y-%m-%dT00:00:00)
+                UNTIL=$(date -d "$(date +%Y)-01-01" +%Y-%m-%dT00:00:00)
+            else
+                local last_y=$(( $(date +%Y) - 1 ))
+                SINCE="${last_y}-01-01T00:00:00"
+                UNTIL="$(date +%Y)-01-01T00:00:00"
+            fi
+            PERIOD_LABEL="${last_y}"
             ;;
         [0-9]|[0-9][0-9])
             local n="$period"
@@ -415,12 +565,21 @@ compute_period() {
             UNTIL=$(printf '%s-%02d-01T00:00:00' "$next_year" "$next_month")
             PERIOD_LABEL=$(portable_date month_label_from "${year}-${month}-01")
             ;;
+        [0-9][0-9][0-9][0-9])
+            SINCE="${period}-01-01T00:00:00"
+            UNTIL="$((period + 1))-01-01T00:00:00"
+            PERIOD_LABEL="$period"
+            ;;
         *)
-            die "Invalid period: $period (expected: current, last, <N>, YYYY-MM)"
+            die "Invalid period: $period (expected: current-month, last-month, current-week, last-week, current-year, last-year, all, <N>, YYYY-MM, YYYY)"
             ;;
     esac
 
-    info "Period: $PERIOD_LABEL ($SINCE → $UNTIL)"
+    if [[ -n "$SINCE" && -n "$UNTIL" ]]; then
+        info "Period: $PERIOD_LABEL ($SINCE → $UNTIL)"
+    else
+        info "Period: $PERIOD_LABEL"
+    fi
 }
 
 # ==============================================================================
@@ -556,13 +715,15 @@ fetch_commits() {
         info "Fetching commits (local)..."
         local dir="$ARG_REPO"
         [[ "$dir" == "." || "$dir" == "./" ]] && dir="$(pwd)"
-        commits=$(git -C "$dir" log "$BRANCH" \
-            --author="$USER_NAME" \
-            --since="$SINCE" --until="$UNTIL" \
-            --format='%h%x09%s%x09%as' --no-merges 2>/dev/null || true)
+        local git_args=("$BRANCH" --author="$USER_NAME" --format='%h%x09%s%x09%as' --no-merges)
+        [[ -n "$SINCE" ]] && git_args+=(--since="$SINCE")
+        [[ -n "$UNTIL" ]] && git_args+=(--until="$UNTIL")
+        commits=$(git -C "$dir" log "${git_args[@]}" 2>/dev/null || true)
     elif command -v gh &>/dev/null; then
         info "Fetching commits (gh api)..."
-        local api_url="repos/${REPO_FULL}/commits?sha=${BRANCH}&author=${USER_NAME}&since=${SINCE}Z&until=${UNTIL}Z&per_page=100"
+        local api_url="repos/${REPO_FULL}/commits?sha=${BRANCH}&author=${USER_NAME}&per_page=100"
+        [[ -n "$SINCE" ]] && api_url+="&since=${SINCE}Z"
+        [[ -n "$UNTIL" ]] && api_url+="&until=${UNTIL}Z"
         local api_err=""
         commits=$(gh api "$api_url" --paginate \
             --jq '.[] | [.sha[0:7], (.commit.message | split("\n")[0]), (.commit.author.date | split("T")[0])] | @tsv' 2>&1) || api_err="$commits"
@@ -576,7 +737,9 @@ fetch_commits() {
     elif command -v curl &>/dev/null; then
         info "Fetching commits (curl)..."
         command -v jq &>/dev/null || die "jq is required when using curl fallback"
-        local url="https://api.github.com/repos/${REPO_FULL}/commits?sha=${BRANCH}&author=${USER_NAME}&since=${SINCE}Z&until=${UNTIL}Z&per_page=100"
+        local url="https://api.github.com/repos/${REPO_FULL}/commits?sha=${BRANCH}&author=${USER_NAME}&per_page=100"
+        [[ -n "$SINCE" ]] && url+="&since=${SINCE}Z"
+        [[ -n "$UNTIL" ]] && url+="&until=${UNTIL}Z"
         local tmpheaders
         tmpheaders=$(mktemp)
         while [[ -n "$url" ]]; do
@@ -749,10 +912,17 @@ generate_summary() {
     local messages
     messages=$(echo "$commits" | cut -f2 | _truncate_messages 200)
 
-    local prompt
-    prompt="You are writing a professional monthly work recap. Below are git commit messages from a developer for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
+    local lang_name voice_instr
+    lang_name=$(_lang_name "$LANG_CODE")
+    voice_instr=$(_voice_instruction "$VOICE_MODE")
 
-Write a concise summary (3-5 sentences) suitable for a monthly report. Synthesize by themes (features, bug fixes, refactoring, documentation, etc.). Use a professional tone. Do not list individual commits — provide a high-level overview of what was accomplished.
+    local prompt
+    prompt="You are writing a professional work recap. Below are git commit messages for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
+
+Write a concise summary (3-5 sentences) suitable for a report. Synthesize by themes (features, bug fixes, refactoring, documentation, etc.). Use a professional tone. Do not list individual commits — provide a high-level overview of what was accomplished.
+
+${voice_instr}
+Write your response in ${lang_name}.
 
 Commit messages:
 ${messages}"
@@ -775,8 +945,12 @@ generate_ai_bullets() {
     local messages
     messages=$(echo "$commits" | cut -f2 | _truncate_messages 200)
 
+    local lang_name voice_instr
+    lang_name=$(_lang_name "$LANG_CODE")
+    voice_instr=$(_voice_instruction "$VOICE_MODE")
+
     local prompt
-    prompt="You are writing bullet points for a monthly work recap. Below are git commit messages from a developer for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
+    prompt="You are writing bullet points for a work recap. Below are git commit messages for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
 
 Transform these commit messages into clean, readable bullet points for a report:
 - Group related changes by theme
@@ -785,6 +959,9 @@ Transform these commit messages into clean, readable bullet points for a report:
 - Remove conventional commit prefixes (feat:, fix:, chore:, etc.)
 - Output one bullet point per line, without any bullet marker (no -, *, etc.)
 - Do not include any headers or categories — just the items
+
+${voice_instr}
+Write your response in ${lang_name}.
 
 Commit messages:
 ${messages}"
@@ -807,11 +984,15 @@ generate_ai_combined() {
     local messages
     messages=$(echo "$commits" | cut -f2 | _truncate_messages 200)
 
+    local lang_name voice_instr
+    lang_name=$(_lang_name "$LANG_CODE")
+    voice_instr=$(_voice_instruction "$VOICE_MODE")
+
     local prompt
-    prompt="You are writing a professional monthly work recap. Below are git commit messages from a developer for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
+    prompt="You are writing a professional work recap. Below are git commit messages for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
 
 PART 1 - SUMMARY:
-Write a concise summary (3-5 sentences) suitable for a monthly report. Synthesize by themes (features, bug fixes, refactoring, documentation, etc.). Use a professional tone. Do not list individual commits — provide a high-level overview.
+Write a concise summary (3-5 sentences) suitable for a report. Synthesize by themes (features, bug fixes, refactoring, documentation, etc.). Use a professional tone. Do not list individual commits — provide a high-level overview.
 
 After the summary, output exactly this separator on its own line:
 ---SPLIT---
@@ -825,13 +1006,16 @@ Transform the commit messages into clean, readable bullet points:
 - Output one bullet point per line, without any bullet marker (no -, *, etc.)
 - Do not include any headers or categories — just the items
 
+${voice_instr}
+Write your response in ${lang_name}.
+
 Commit messages:
 ${messages}"
 
     local result
     if result=$(call_ai "$prompt" "Generating AI recap..."); then
         if [[ "$result" == *"---SPLIT---"* ]]; then
-            AI_SUMMARY=$(echo "$result" | sed -n '1,/---SPLIT---/{/---SPLIT---/!p}')
+            AI_SUMMARY=$(echo "$result" | sed '/---SPLIT---/,$d')
             AI_BULLETS=$(echo "$result" | sed '1,/---SPLIT---/d' | _strip_bullet_markers)
             if [[ -n "$AI_SUMMARY" && -n "$AI_BULLETS" ]]; then
                 return 0
@@ -1111,6 +1295,28 @@ main() {
     if [[ -z "$ARG_FORMAT" && -n "${GIT_RECAP_FORMAT:-}" ]]; then
         ARG_FORMAT="$GIT_RECAP_FORMAT"
     fi
+
+    # Resolve language
+    if [[ -n "$ARG_LANG" ]]; then
+        LANG_CODE="$ARG_LANG"
+    elif [[ -n "${GIT_RECAP_LANG:-}" ]]; then
+        LANG_CODE="$GIT_RECAP_LANG"
+    else
+        LANG_CODE="$DEFAULT_LANG"
+    fi
+
+    # Resolve voice: normalize je→I, nous→we
+    if [[ -n "$ARG_VOICE" ]]; then
+        VOICE_MODE="$ARG_VOICE"
+    elif [[ -n "${GIT_RECAP_VOICE:-}" ]]; then
+        VOICE_MODE="$GIT_RECAP_VOICE"
+    else
+        VOICE_MODE="$DEFAULT_VOICE"
+    fi
+    case "$VOICE_MODE" in
+        je|i) VOICE_MODE="I" ;;
+        nous|We) VOICE_MODE="we" ;;
+    esac
 
     # Resolve repo
     resolve_repo

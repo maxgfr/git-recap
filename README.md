@@ -1,6 +1,6 @@
 # git-recap
 
-Monthly commit recap generator — AI-powered summaries, bullet points, and commit lists.
+Commit recap generator — AI-powered summaries, bullet points, and commit lists.
 
 Supports multiple AI providers: **Claude** (CLI & API), **OpenAI**, **Mistral**, **Gemini**.
 
@@ -41,18 +41,37 @@ Arguments:
 
 Options:
   -u, --user <user>       GitHub username (auto-detected via gh)
-  -p, --period <period>   Period: current, last, <N>, YYYY-MM (default: current)
+  -p, --period <period>   Period (default: current-month). Values:
+                           current-month, last-month, current-week, last-week,
+                           current-year, last-year, all, <N>, YYYY-MM, YYYY
   -m, --mode <mode>       Mode: summary, commits, bullets, all (default: all)
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
   -b, --branch <branch>   Branch (default: auto-detected)
   --provider <provider>   AI provider: claude, claude-api, openai, mistral, gemini (default: claude)
   --model <model>         AI model override (see defaults below)
+  --lang <lang>           Language for AI output: en, fr, es, de, ... (default: en)
+  --voice <voice>         Narrative voice: I or we (default: I)
   --no-ai                 Skip AI generation (summary/bullets)
   --init                  Initialize configuration
   -h, --help              Show this help
   -v, --version           Show version
 ```
+
+### Periods
+
+| Period | Description |
+|--------|-------------|
+| `current-month` | Current month (default) |
+| `last-month` | Previous month |
+| `current-week` | Current week (Monday to Sunday) |
+| `last-week` | Previous week |
+| `current-year` | Current year |
+| `last-year` | Previous year |
+| `all` | All commits ever |
+| `<N>` | Last N months |
+| `YYYY-MM` | Specific month (e.g., `2026-01`) |
+| `YYYY` | Specific year (e.g., `2025`) |
 
 ### AI Providers & Default Models
 
@@ -73,6 +92,21 @@ git-recap --provider openai --model gpt-4o maxgfr/subtool
 git-recap --provider gemini --model gemini-1.5-pro maxgfr/subtool
 ```
 
+### Language & Voice
+
+Control the language and narrative voice of AI-generated content:
+
+```bash
+# French output, first person
+git-recap --lang fr maxgfr/subtool
+
+# English, team voice ("we implemented...", "we fixed...")
+git-recap --lang en --voice we maxgfr/subtool
+
+# French, first person singular ("j'ai implémenté...", "j'ai corrigé...")
+git-recap --lang fr --voice I maxgfr/subtool
+```
+
 ## Examples
 
 ```bash
@@ -80,7 +114,16 @@ git-recap --provider gemini --model gemini-1.5-pro maxgfr/subtool
 git-recap maxgfr/subtool
 
 # Last month, markdown output
-git-recap -p last -f markdown -o recap.md maxgfr/subtool
+git-recap -p last-month -f markdown -o recap.md maxgfr/subtool
+
+# Current week recap
+git-recap -p current-week maxgfr/subtool
+
+# All commits ever
+git-recap -p all maxgfr/subtool
+
+# Full year 2025
+git-recap -p 2025 maxgfr/subtool
 
 # Specific month, commits only
 git-recap -p 2026-01 -m commits maxgfr/subtool
@@ -99,6 +142,9 @@ git-recap -f json -m commits maxgfr/subtool | jq .
 
 # No AI, just raw data
 git-recap --no-ai -m all maxgfr/subtool
+
+# French recap, first person
+git-recap --lang fr --voice I maxgfr/subtool
 
 # From various URL formats
 git-recap https://github.com/maxgfr/subtool
@@ -152,6 +198,8 @@ GIT_RECAP_USER="maxgfr"
 GIT_RECAP_PROVIDER="claude"
 GIT_RECAP_MODEL=""
 GIT_RECAP_FORMAT="text"
+GIT_RECAP_LANG="en"
+GIT_RECAP_VOICE="I"
 ```
 
 ## License
