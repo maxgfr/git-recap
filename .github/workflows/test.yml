@@ -1,0 +1,28 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y jq
+
+      - name: Make script executable
+        run: chmod +x git-recap test-git-recap.sh
+
+      - name: Run tests
+        run: bash test-git-recap.sh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

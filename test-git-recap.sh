@@ -80,14 +80,139 @@ assert_exit() {
 }
 
 # ==============================================================================
-# Tests
+# Unit tests (source script without running main)
 # ==============================================================================
 
 echo ""
 echo "$(_bold "=== git-recap tests ===")"
 echo ""
 
-# ---------- CLI basics ----------
+echo "$(_bold "Unit tests")"
+echo ""
+
+# Source the script without set -e and without running main
+_GR_TMP=$(mktemp)
+sed -e '/^set -euo pipefail$/d' -e '/^main "\$@"$/d' "$GIT_RECAP" > "$_GR_TMP"
+# shellcheck disable=SC1090
+source "$_GR_TMP"
+rm -f "$_GR_TMP"
+
+# ---------- _strip_bullet_markers ----------
+
+echo "$(_bold "  _strip_bullet_markers")"
+
+out=$(echo "- item one" | _strip_bullet_markers)
+assert_eq "strips - prefix" "item one" "$out"
+
+out=$(echo "* item two" | _strip_bullet_markers)
+assert_eq "strips * prefix" "item two" "$out"
+
+out=$(echo "+ item three" | _strip_bullet_markers)
+assert_eq "strips + prefix" "item three" "$out"
+
+out=$(echo "1. item four" | _strip_bullet_markers)
+assert_eq "strips 1. prefix" "item four" "$out"
+
+out=$(echo "2) item five" | _strip_bullet_markers)
+assert_eq "strips 2) prefix" "item five" "$out"
+
+out=$(echo "  - indented item" | _strip_bullet_markers)
+assert_eq "strips indented - prefix" "indented item" "$out"
+
+out=$(echo "plain text" | _strip_bullet_markers)
+assert_eq "preserves plain text" "plain text" "$out"
+
+out=$(printf '%s\n%s\n%s\n' "- first" "" "- second" | _strip_bullet_markers)
+expected=$'first\nsecond'
+assert_eq "removes empty lines between items" "$expected" "$out"
+
+echo ""
+
+# ---------- _truncate_messages ----------
+
+echo "$(_bold "  _truncate_messages")"
+
+input=$(printf '%s\n' {1..5})
+out=$(echo "$input" | _truncate_messages 3 2>/dev/null)
+count=$(echo "$out" | wc -l | tr -d ' ')
+assert_eq "truncates to max" "3" "$count"
+
+out=$(echo "$input" | _truncate_messages 10 2>/dev/null)
+count=$(echo "$out" | wc -l | tr -d ' ')
+assert_eq "no truncation when under max" "5" "$count"
+
+out=$(echo "single line" | _truncate_messages 5 2>/dev/null)
+assert_eq "single line passes through" "single line" "$out"
+
+echo ""
+
+# ---------- portable_date ----------
+
+echo "$(_bold "  portable_date")"
+
+out=$(portable_date first_of_month 0)
+assert_contains "first_of_month format has T00:00:00" "$out" "T00:00:00"
+assert_contains "first_of_month day is 01" "$out" "-01T"
+
+out=$(portable_date first_of_next_month)
+assert_contains "first_of_next_month format has T00:00:00" "$out" "T00:00:00"
+assert_contains "first_of_next_month day is 01" "$out" "-01T"
+
+out=$(portable_date month_label 0)
+current_year=$(date +%Y)
+assert_contains "month_label contains year" "$out" "$current_year"
+
+out=$(portable_date month_label_from "2026-01-15")
+assert_contains "month_label_from January" "$out" "January"
+assert_contains "month_label_from 2026" "$out" "2026"
+
+echo ""
+
+# ---------- resolve_repo (SSH URL) ----------
+
+echo "$(_bold "  resolve_repo (SSH URL)")"
+
+out=$(
+    ARG_REPO="git@github.com:maxgfr/subtool.git"
+    REPO_MODE="" REPO_FULL="" REPO_NAME="" USER_NAME="test"
+    resolve_repo 2>/dev/null
+    echo "${REPO_FULL}|${REPO_NAME}|${REPO_MODE}"
+)
+assert_eq "SSH URL resolves correctly" "maxgfr/subtool|subtool|remote" "$out"
+
+out=$(
+    ARG_REPO="git@github.com:owner/repo"
+    REPO_MODE="" REPO_FULL="" REPO_NAME="" USER_NAME="test"
+    resolve_repo 2>/dev/null
+    echo "${REPO_FULL}|${REPO_NAME}|${REPO_MODE}"
+)
+assert_eq "SSH URL without .git resolves" "owner/repo|repo|remote" "$out"
+
+echo ""
+
+# ---------- compute_stats ----------
+
+echo "$(_bold "  compute_stats")"
+
+input=$'abc1234\tfirst commit\t2026-03-01\nabc1235\tsecond commit\t2026-03-01\nabc1236\tthird commit\t2026-03-15'
+out=$(compute_stats "$input")
+assert_contains "stats total=3" "$out" "3|"
+assert_contains "stats first date" "$out" "2026-03-01"
+assert_contains "stats last date" "$out" "2026-03-15"
+assert_contains "stats busiest day is 2026-03-01" "$out" "|2026-03-01|"
+assert_contains "stats busiest count is 2" "$out" "|2"
+
+# Single commit
+input=$'abc1234\tonly commit\t2026-05-10'
+out=$(compute_stats "$input")
+assert_contains "single commit total=1" "$out" "1|"
+assert_contains "single commit date" "$out" "2026-05-10"
+
+echo ""
+
+# ==============================================================================
+# Integration tests
+# ==============================================================================
 
 echo "$(_bold "CLI basics")"
 
@@ -96,11 +221,15 @@ out=$("$GIT_RECAP" --help 2>/dev/null)
 assert_exit "--help exits 0" 0 "$GIT_RECAP" --help
 assert_contains "--help shows usage" "$out" "Usage:"
 assert_contains "--help shows options" "$out" "Options:"
+assert_contains "--help shows --no-ai" "$out" "--no-ai"
+assert_contains "--help shows json format" "$out" "json"
+assert_contains "--help shows SSH example" "$out" "git@github.com"
 
 # 2. --version
 out=$("$GIT_RECAP" --version 2>/dev/null)
 assert_exit "--version exits 0" 0 "$GIT_RECAP" --version
 assert_contains "--version shows version" "$out" "git-recap"
+assert_contains "--version shows 1.1.0" "$out" "1.1.0"
 
 # 3. No arguments
 assert_exit "no arguments exits 1" 1 "$GIT_RECAP"
@@ -122,25 +251,30 @@ assert_exit "invalid provider exits 1" 1 "$GIT_RECAP" --provider gemini somerepo
 err=$("$GIT_RECAP" --provider gemini somerepo 2>&1 || true)
 assert_contains "invalid provider shows error" "$err" "Invalid provider"
 
+# 7. --no-ai flag accepted
+assert_exit "--no-ai with --help exits 0" 0 "$GIT_RECAP" --no-ai --help
+
 echo ""
 
 # ---------- Repo resolution ----------
 
 echo "$(_bold "Repo resolution")"
 
-# 7. owner/repo format
-# We test by sourcing the functions. Since we can't easily source a set -e script,
-# we use the output which prints "Repo: owner/repo"
+# 8. owner/repo format
 out=$("$GIT_RECAP" -m commits -u testuser maxgfr/subtool 2>&1 || true)
 assert_contains "owner/repo resolves correctly" "$out" "Repo: maxgfr/subtool"
 
-# 8. URL format
+# 9. URL format
 out=$("$GIT_RECAP" -m commits -u testuser https://github.com/maxgfr/subtool 2>&1 || true)
 assert_contains "URL resolves correctly" "$out" "Repo: maxgfr/subtool"
 
-# 9. Repo name only (prefixed with username)
+# 10. Repo name only (prefixed with username)
 out=$("$GIT_RECAP" -m commits -u maxgfr mytestrepo 2>&1 || true)
 assert_contains "repo name prefixed with user" "$out" "Repo: maxgfr/mytestrepo"
+
+# 11. SSH URL
+out=$("$GIT_RECAP" -m commits -u testuser git@github.com:maxgfr/subtool.git 2>&1 || true)
+assert_contains "SSH URL resolves correctly" "$out" "Repo: maxgfr/subtool"
 
 echo ""
 
@@ -148,24 +282,23 @@ echo ""
 
 echo "$(_bold "Period computation")"
 
-# 10. current period
+# 12. current period
 out=$("$GIT_RECAP" -m commits -p current -u testuser maxgfr/subtool 2>&1 || true)
-current_month=$(LC_ALL=C date +"%B %Y")
+current_month=$(portable_date month_label 0)
 assert_contains "period current shows current month" "$out" "$current_month"
 
-# 11. last period
+# 13. last period
 out=$("$GIT_RECAP" -m commits -p last -u testuser maxgfr/subtool 2>&1 || true)
-last_month=$(LC_ALL=C date -v-1m +"%B %Y")
+last_month=$(portable_date month_label -1)
 assert_contains "period last shows last month" "$out" "$last_month"
 
-# 12. YYYY-MM period
+# 14. YYYY-MM period
 out=$("$GIT_RECAP" -m commits -p 2026-01 -u testuser maxgfr/subtool 2>&1 || true)
 assert_contains "YYYY-MM period: correct SINCE" "$out" "2026-01-01"
 assert_contains "YYYY-MM period: correct UNTIL" "$out" "2026-02-01"
 
-# 13. Numeric month (december rollover)
+# 15. Numeric month (december rollover)
 out=$("$GIT_RECAP" -m commits -p 12 -u testuser maxgfr/subtool 2>&1 || true)
-# 12 months ago should show a valid period label
 assert_contains "numeric period shows Period:" "$out" "Period:"
 
 echo ""
@@ -174,9 +307,8 @@ echo ""
 
 echo "$(_bold "Fetch commits (integration)")"
 
-# 14. Fetch commits from maxgfr/subtool
+# 16. Fetch commits from maxgfr/subtool
 out=$("$GIT_RECAP" -m commits -p 2025-01 -u maxgfr maxgfr/subtool 2>&1)
-# Should contain commit data (TSV format) or "No commits"
 if [[ "$out" == *"Commits"* ]] || [[ "$out" == *"No commits"* ]]; then
     TOTAL=$((TOTAL + 1))
     PASS=$((PASS + 1))
@@ -194,10 +326,9 @@ echo ""
 
 echo "$(_bold "Mode filtering")"
 
-# 15. Mode commits
-out=$("$GIT_RECAP" -m commits -p 2025-04 -u maxgfr maxgfr/subtool 2>&1)
+# 17. Mode commits
+out=$("$GIT_RECAP" --no-ai -m commits -p 2025-04 -u maxgfr maxgfr/subtool 2>&1)
 if [[ "$out" == *"No commits"* ]]; then
-    # No commits in this period — check mode filtering still works
     assert_contains "mode commits: no summary in empty" "$out" "Recap"
     assert_not_contains "mode commits: no Summary section" "$out" "Summary"
 else
@@ -205,8 +336,8 @@ else
     assert_not_contains "mode commits: no Summary section" "$out" "Summary"
 fi
 
-# 16. Mode bullets
-out=$("$GIT_RECAP" -m bullets -p 2025-04 -u maxgfr maxgfr/subtool 2>&1)
+# 18. Mode bullets
+out=$("$GIT_RECAP" --no-ai -m bullets -p 2025-04 -u maxgfr maxgfr/subtool 2>&1)
 if [[ "$out" == *"No commits"* ]]; then
     assert_contains "mode bullets: no commits in empty" "$out" "Recap"
     assert_not_contains "mode bullets: no Commits section" "$out" "Commits"
@@ -221,13 +352,100 @@ echo ""
 
 echo "$(_bold "Format output")"
 
-# 17. Markdown format
-out=$("$GIT_RECAP" -m commits -p 2025-01 -f markdown -u maxgfr maxgfr/subtool 2>&1)
+# 19. Markdown format
+out=$("$GIT_RECAP" --no-ai -m commits -p 2025-01 -f markdown -u maxgfr maxgfr/subtool 2>&1)
 assert_contains "markdown format: has # header" "$out" "#"
 
-# 18. Text format
-out=$("$GIT_RECAP" -m commits -p 2025-01 -f text -u maxgfr maxgfr/subtool 2>&1)
+# 20. Text format
+out=$("$GIT_RECAP" --no-ai -m commits -p 2025-01 -f text -u maxgfr maxgfr/subtool 2>&1)
 assert_contains "text format: has === header" "$out" "==="
+
+# 21. Markdown commit links
+if [[ "$out" != *"No commits"* ]]; then
+    md_out=$("$GIT_RECAP" --no-ai -m commits -p 2025-01 -f markdown -u maxgfr maxgfr/subtool 2>/dev/null || true)
+    if [[ "$md_out" == *"github.com"* ]]; then
+        assert_contains "markdown has commit links" "$md_out" "https://github.com/maxgfr/subtool/commit/"
+    fi
+fi
+
+echo ""
+
+# ---------- JSON format ----------
+
+echo "$(_bold "JSON format")"
+
+# 22. JSON output is valid
+if command -v jq &>/dev/null; then
+    json_out=$("$GIT_RECAP" --no-ai -f json -m commits -p 2025-01 -u maxgfr maxgfr/subtool 2>/dev/null)
+    if echo "$json_out" | jq . >/dev/null 2>&1; then
+        TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1))
+        printf '  %s %s\n' "$(_green "PASS")" "-f json produces valid JSON"
+    else
+        TOTAL=$((TOTAL + 1)); FAIL=$((FAIL + 1))
+        printf '  %s %s\n' "$(_red "FAIL")" "-f json produces valid JSON"
+    fi
+
+    # 23. JSON has expected fields
+    assert_contains "json has repo field" "$json_out" '"repo"'
+    assert_contains "json has period field" "$json_out" '"period"'
+    assert_contains "json has user field" "$json_out" '"user"'
+    if [[ "$json_out" != *'"commits": []'* ]]; then
+        assert_contains "json has stats field" "$json_out" '"stats"'
+    else
+        TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1))
+        printf '  %s %s\n' "$(_green "PASS")" "json stats: no commits (skip)"
+    fi
+
+    # 24. JSON empty commits
+    json_empty=$("$GIT_RECAP" --no-ai -f json -m commits -p 2020-01 -u maxgfr maxgfr/subtool 2>/dev/null)
+    if echo "$json_empty" | jq . >/dev/null 2>&1; then
+        TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1))
+        printf '  %s %s\n' "$(_green "PASS")" "-f json with no commits is valid JSON"
+    else
+        TOTAL=$((TOTAL + 1)); FAIL=$((FAIL + 1))
+        printf '  %s %s\n' "$(_red "FAIL")" "-f json with no commits is valid JSON"
+    fi
+else
+    echo "  SKIP: jq not installed, skipping JSON tests"
+fi
+
+echo ""
+
+# ---------- --no-ai ----------
+
+echo "$(_bold "--no-ai flag")"
+
+# 25. --no-ai skips summary
+out=$("$GIT_RECAP" --no-ai -m all -p 2025-04 -u maxgfr -f text maxgfr/subtool 2>&1)
+if [[ "$out" != *"No commits"* ]]; then
+    assert_not_contains "--no-ai: no Summary section" "$out" "--- Summary ---"
+    assert_contains "--no-ai: Changes section present (raw bullets)" "$out" "Changes"
+else
+    TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1))
+    printf '  %s %s\n' "$(_green "PASS")" "--no-ai: no commits to verify (skip)"
+fi
+
+echo ""
+
+# ---------- Stats section ----------
+
+echo "$(_bold "Stats section")"
+
+# 26. Stats in text output
+out=$("$GIT_RECAP" --no-ai -m commits -p 2025-04 -u maxgfr -f text maxgfr/subtool 2>&1)
+if [[ "$out" != *"No commits"* ]]; then
+    assert_contains "stats section in text output" "$out" "Stats"
+    assert_contains "stats has total commits" "$out" "Total commits"
+else
+    TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1))
+    printf '  %s %s\n' "$(_green "PASS")" "stats: no commits to verify (skip)"
+fi
+
+# 27. Stats in markdown output
+out=$("$GIT_RECAP" --no-ai -m commits -p 2025-04 -u maxgfr -f markdown maxgfr/subtool 2>&1)
+if [[ "$out" != *"No commits"* ]]; then
+    assert_contains "stats section in markdown output" "$out" "## Stats"
+fi
 
 echo ""
 
@@ -235,9 +453,9 @@ echo ""
 
 echo "$(_bold "Output file")"
 
-# 19. --output writes file
+# 28. --output writes file
 tmpfile=$(mktemp /tmp/git-recap-test.XXXXXX)
-"$GIT_RECAP" -m commits -p 2025-01 -u maxgfr -o "$tmpfile" maxgfr/subtool 2>/dev/null || true
+"$GIT_RECAP" --no-ai -m commits -p 2025-01 -u maxgfr -o "$tmpfile" maxgfr/subtool 2>/dev/null || true
 if [[ -s "$tmpfile" ]]; then
     TOTAL=$((TOTAL + 1))
     PASS=$((PASS + 1))

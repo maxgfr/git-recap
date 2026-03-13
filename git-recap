@@ -5,7 +5,7 @@ set -euo pipefail
 # git-recap — Monthly commit recap CLI
 # ==============================================================================
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 CONFIG_FILE="$HOME/.git-recaprc"
 
 # Defaults
@@ -24,6 +24,7 @@ ARG_BRANCH=""
 ARG_PROVIDER=""
 ARG_REPO=""
 ARG_INIT=false
+NO_AI=false
 
 # Resolved values
 USER_NAME=""
@@ -36,6 +37,8 @@ UNTIL=""
 PERIOD_LABEL=""
 PROVIDER=""
 SPINNER_PID=""
+AI_SUMMARY=""
+AI_BULLETS=""
 
 # ==============================================================================
 # Helpers
@@ -77,7 +80,107 @@ spinner_stop() {
 cleanup() {
     spinner_stop
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM HUP
+
+# --- Portable date ---
+
+_GNU_DATE=""
+_is_gnu_date() {
+    if [[ -z "$_GNU_DATE" ]]; then
+        if date --version >/dev/null 2>&1; then
+            _GNU_DATE=1
+        else
+            _GNU_DATE=0
+        fi
+    fi
+    [[ "$_GNU_DATE" -eq 1 ]]
+}
+
+# portable_date <operation> [args...]
+#   first_of_month <offset>       - First day of month, offset months from now
+#   first_of_next_month           - First day of next month
+#   month_label <offset>          - Human month label, offset months from now
+#   month_label_from <YYYY-MM-DD> - Human month label from specific date
+portable_date() {
+    local op="$1"; shift
+    case "$op" in
+        first_of_month)
+            local offset="${1:-0}"
+            if _is_gnu_date; then
+                if [[ "$offset" -eq 0 ]]; then
+                    date -d "$(date +%Y-%m-01)" +%Y-%m-%dT00:00:00
+                elif [[ "$offset" -lt 0 ]]; then
+                    local abs=$(( -offset ))
+                    date -d "$(date +%Y-%m-01) -${abs} month" +%Y-%m-%dT00:00:00
+                else
+                    date -d "$(date +%Y-%m-01) +${offset} month" +%Y-%m-%dT00:00:00
+                fi
+            else
+                if [[ "$offset" -eq 0 ]]; then
+                    LC_ALL=C date -v1d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S
+                elif [[ "$offset" -lt 0 ]]; then
+                    LC_ALL=C date -v1d -v"${offset}"m -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S
+                else
+                    LC_ALL=C date -v1d -v+"${offset}"m -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S
+                fi
+            fi
+            ;;
+        first_of_next_month)
+            if _is_gnu_date; then
+                date -d "$(date +%Y-%m-01) +1 month" +%Y-%m-%dT00:00:00
+            else
+                LC_ALL=C date -v1d -v+1m -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S
+            fi
+            ;;
+        month_label)
+            local offset="${1:-0}"
+            if _is_gnu_date; then
+                if [[ "$offset" -eq 0 ]]; then
+                    LC_ALL=C date +"%B %Y"
+                elif [[ "$offset" -lt 0 ]]; then
+                    local abs=$(( -offset ))
+                    LC_ALL=C date -d "-${abs} month" +"%B %Y"
+                else
+                    LC_ALL=C date -d "+${offset} month" +"%B %Y"
+                fi
+            else
+                if [[ "$offset" -eq 0 ]]; then
+                    LC_ALL=C date +"%B %Y"
+                else
+                    LC_ALL=C date -v"${offset}"m +"%B %Y"
+                fi
+            fi
+            ;;
+        month_label_from)
+            local from_date="$1"
+            if _is_gnu_date; then
+                LC_ALL=C date -d "$from_date" +"%B %Y"
+            else
+                LC_ALL=C date -jf '%Y-%m-%d' "$from_date" +"%B %Y" 2>/dev/null || echo "${from_date:0:7}"
+            fi
+            ;;
+    esac
+}
+
+# --- AI helpers ---
+
+_strip_bullet_markers() {
+    sed -E 's/^[[:space:]]*([-*+]|[0-9]+[.)]) //' | grep -v '^[[:space:]]*$' || true
+}
+
+_truncate_messages() {
+    local max="${1:-200}"
+    local lines
+    lines=$(cat)
+    local count
+    count=$(echo "$lines" | wc -l | tr -d ' ')
+    if [[ $count -gt $max ]]; then
+        warn "Truncating to $max commit messages for AI"
+        echo "$lines" | head -"$max"
+    else
+        echo "$lines"
+    fi
+}
 
 # ==============================================================================
 # Help
@@ -91,16 +194,17 @@ Usage:
   git-recap [OPTIONS] <repo>
 
 Arguments:
-  <repo>              GitHub URL, owner/repo, repo name, or local path (.)
+  <repo>              GitHub URL, owner/repo, repo name, SSH URL, or local path (.)
 
 Options:
   -u, --user <user>       GitHub username (auto-detected via gh)
   -p, --period <period>   Period: current, last, <N>, YYYY-MM (default: current)
   -m, --mode <mode>       Mode: summary, commits, bullets, all (default: all)
-  -f, --format <format>   Format: text, markdown (default: text)
+  -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
   -b, --branch <branch>   Branch (default: auto-detected)
   --provider <provider>   AI provider: claude, openai (default: claude)
+  --no-ai                 Skip AI generation (summary/bullets)
   --init                  Initialize configuration
   -h, --help              Show this help
   -v, --version           Show version
@@ -110,6 +214,9 @@ Examples:
   git-recap -p last -f markdown -o recap.md maxgfr/subtool
   git-recap -p 2026-01 -m commits maxgfr/subtool
   git-recap https://github.com/maxgfr/subtool
+  git-recap git@github.com:maxgfr/subtool.git
+  git-recap -f json -m commits maxgfr/subtool | jq .
+  git-recap --no-ai -m all maxgfr/subtool
   git-recap .
 HELP
 }
@@ -128,6 +235,7 @@ parse_args() {
             -o|--output)  ARG_OUTPUT="${2:?Missing value for $1}"; shift 2 ;;
             -b|--branch)  ARG_BRANCH="${2:?Missing value for $1}"; shift 2 ;;
             --provider)   ARG_PROVIDER="${2:?Missing value for $1}"; shift 2 ;;
+            --no-ai)      NO_AI=true; shift ;;
             --init)       ARG_INIT=true; shift ;;
             -h|--help)    show_help; exit 0 ;;
             -v|--version) echo "git-recap $VERSION"; exit 0 ;;
@@ -150,8 +258,8 @@ validate_args() {
     esac
 
     case "$format" in
-        text|markdown) ;;
-        *) die "Invalid format: $format (expected: text, markdown)" ;;
+        text|markdown|json) ;;
+        *) die "Invalid format: $format (expected: text, markdown, json)" ;;
     esac
 
     case "$provider" in
@@ -170,8 +278,20 @@ validate_args() {
 
 config_load() {
     if [[ -f "$CONFIG_FILE" ]]; then
-        # shellcheck disable=SC1090
-        source "$CONFIG_FILE"
+        local _line_num=0
+        while IFS= read -r _line || [[ -n "$_line" ]]; do
+            _line_num=$((_line_num + 1))
+            [[ -z "$_line" || "$_line" =~ ^[[:space:]]*# ]] && continue
+            if [[ "$_line" =~ ^GIT_RECAP_USER=\"([^\"]*)\"$ ]]; then
+                GIT_RECAP_USER="${BASH_REMATCH[1]}"
+            elif [[ "$_line" =~ ^GIT_RECAP_PROVIDER=\"([^\"]*)\"$ ]]; then
+                GIT_RECAP_PROVIDER="${BASH_REMATCH[1]}"
+            elif [[ "$_line" =~ ^GIT_RECAP_FORMAT=\"([^\"]*)\"$ ]]; then
+                GIT_RECAP_FORMAT="${BASH_REMATCH[1]}"
+            else
+                warn "Ignoring unrecognized config line $_line_num in $CONFIG_FILE"
+            fi
+        done < "$CONFIG_FILE"
     fi
 }
 
@@ -230,30 +350,28 @@ compute_period() {
 
     case "$period" in
         current|"")
-            SINCE=$(LC_ALL=C date -v1d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
-            UNTIL=$(LC_ALL=C date -v1d -v+1m -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
-            PERIOD_LABEL=$(LC_ALL=C date +"%B %Y")
+            SINCE=$(portable_date first_of_month 0)
+            UNTIL=$(portable_date first_of_next_month)
+            PERIOD_LABEL=$(portable_date month_label 0)
             ;;
         last)
-            SINCE=$(LC_ALL=C date -v1d -v-1m -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
-            UNTIL=$(LC_ALL=C date -v1d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
-            PERIOD_LABEL=$(LC_ALL=C date -v-1m +"%B %Y")
+            SINCE=$(portable_date first_of_month -1)
+            UNTIL=$(portable_date first_of_month 0)
+            PERIOD_LABEL=$(portable_date month_label -1)
             ;;
         [0-9]|[0-9][0-9])
             local n="$period"
-            SINCE=$(LC_ALL=C date -v1d -v-"${n}"m -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
-            UNTIL=$(LC_ALL=C date -v1d -v+1m -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
+            SINCE=$(portable_date first_of_month "-${n}")
+            UNTIL=$(portable_date first_of_next_month)
             local start_label end_label
-            start_label=$(LC_ALL=C date -v-"${n}"m +"%B %Y")
-            end_label=$(LC_ALL=C date +"%B %Y")
+            start_label=$(portable_date month_label "-${n}")
+            end_label=$(portable_date month_label 0)
             PERIOD_LABEL="${start_label} - ${end_label}"
             ;;
         [0-9][0-9][0-9][0-9]-[0-9][0-9])
             local year="${period%%-*}"
             local month="${period##*-}"
-            # Build SINCE from the given YYYY-MM
             SINCE="${year}-${month}-01T00:00:00"
-            # Compute UNTIL (first day of next month)
             local next_month=$((10#$month + 1))
             local next_year="$year"
             if [[ $next_month -gt 12 ]]; then
@@ -261,7 +379,7 @@ compute_period() {
                 next_year=$((year + 1))
             fi
             UNTIL=$(printf '%s-%02d-01T00:00:00' "$next_year" "$next_month")
-            PERIOD_LABEL=$(LC_ALL=C date -jf '%Y-%m-%d' "${year}-${month}-01" +"%B %Y" 2>/dev/null || echo "$period")
+            PERIOD_LABEL=$(portable_date month_label_from "${year}-${month}-01")
             ;;
         *)
             die "Invalid period: $period (expected: current, last, <N>, YYYY-MM)"
@@ -287,10 +405,8 @@ resolve_repo() {
         else
             dir="$(cd "$repo" && pwd)"
         fi
-        # Extract owner/repo from remote origin
         local remote_url
         remote_url=$(git -C "$dir" remote get-url origin 2>/dev/null) || die "No remote 'origin' found in $dir"
-        # Strip to owner/repo
         REPO_FULL=$(echo "$remote_url" | sed -E 's#^(https://github\.com/|git@github\.com:)##; s/\.git$//')
         REPO_NAME="${REPO_FULL##*/}"
         info "Local repo: $REPO_FULL"
@@ -302,6 +418,14 @@ resolve_repo() {
     # GitHub URL
     if [[ "$repo" == https://github.com/* ]]; then
         REPO_FULL=$(echo "$repo" | sed -E 's#^https://github\.com/##; s/\.git$//; s#/$##')
+        REPO_NAME="${REPO_FULL##*/}"
+        info "Repo: $REPO_FULL"
+        return
+    fi
+
+    # SSH URL
+    if [[ "$repo" == git@github.com:* ]]; then
+        REPO_FULL=$(echo "$repo" | sed -E 's#^git@github\.com:##; s/\.git$//')
         REPO_NAME="${REPO_FULL##*/}"
         info "Repo: $REPO_FULL"
         return
@@ -351,6 +475,11 @@ check_gh_auth() {
 check_dependencies() {
     command -v git &>/dev/null || die "git is required but not found"
 
+    local format="${ARG_FORMAT:-$DEFAULT_FORMAT}"
+    if [[ "$format" == "json" ]]; then
+        command -v jq &>/dev/null || die "jq is required for JSON format"
+    fi
+
     if [[ "${REPO_MODE:-remote}" == "remote" ]]; then
         if ! command -v gh &>/dev/null && ! command -v curl &>/dev/null; then
             die "gh or curl is required for remote repos"
@@ -358,14 +487,16 @@ check_dependencies() {
         check_gh_auth
     fi
 
-    local mode="${ARG_MODE:-$DEFAULT_MODE}"
-    if [[ "$mode" == "summary" || "$mode" == "bullets" || "$mode" == "all" ]]; then
-        local provider="${PROVIDER:-$DEFAULT_PROVIDER}"
-        if [[ "$provider" == "claude" ]] && ! command -v claude &>/dev/null; then
-            warn "claude CLI not found — AI summary will be skipped"
-        fi
-        if [[ "$provider" == "openai" ]] && [[ -z "${OPENAI_API_KEY:-}" ]]; then
-            warn "OPENAI_API_KEY not set — AI summary will be skipped"
+    if [[ "$NO_AI" == false ]]; then
+        local mode="${ARG_MODE:-$DEFAULT_MODE}"
+        if [[ "$mode" == "summary" || "$mode" == "bullets" || "$mode" == "all" ]]; then
+            local provider="${PROVIDER:-$DEFAULT_PROVIDER}"
+            if [[ "$provider" == "claude" ]] && ! command -v claude &>/dev/null; then
+                warn "claude CLI not found — AI summary will be skipped"
+            fi
+            if [[ "$provider" == "openai" ]] && [[ -z "${OPENAI_API_KEY:-}" ]]; then
+                warn "OPENAI_API_KEY not set — AI summary will be skipped"
+            fi
         fi
     fi
 }
@@ -400,14 +531,28 @@ fetch_commits() {
         fi
     elif command -v curl &>/dev/null; then
         info "Fetching commits (curl)..."
+        command -v jq &>/dev/null || die "jq is required when using curl fallback"
         local url="https://api.github.com/repos/${REPO_FULL}/commits?sha=${BRANCH}&author=${USER_NAME}&since=${SINCE}Z&until=${UNTIL}Z&per_page=100"
-        local json
-        json=$(curl -s "$url")
-        if command -v jq &>/dev/null; then
-            commits=$(echo "$json" | jq -r '.[] | [.sha[0:7], (.commit.message | split("\n")[0]), (.commit.author.date | split("T")[0])] | @tsv' 2>/dev/null || true)
-        else
-            die "jq is required when using curl fallback"
-        fi
+        local tmpheaders
+        tmpheaders=$(mktemp)
+        while [[ -n "$url" ]]; do
+            local page_json
+            page_json=$(curl -s -D "$tmpheaders" "$url")
+            local page_commits
+            page_commits=$(echo "$page_json" | jq -r '.[] | [.sha[0:7], (.commit.message | split("\n")[0]), (.commit.author.date | split("T")[0])] | @tsv' 2>/dev/null || true)
+            if [[ -n "$page_commits" ]]; then
+                if [[ -n "$commits" ]]; then
+                    commits="${commits}"$'\n'"${page_commits}"
+                else
+                    commits="$page_commits"
+                fi
+            fi
+            # Parse Link header for next page
+            local next_url
+            next_url=$(sed -n 's/.*<\([^>]*\)>; *rel="next".*/\1/p' "$tmpheaders" | tr -d '\r') || true
+            url="$next_url"
+        done
+        rm -f "$tmpheaders"
     else
         die "No method available to fetch commits"
     fi
@@ -426,32 +571,63 @@ fetch_commits() {
 }
 
 # ==============================================================================
-# AI Summary
+# AI
 # ==============================================================================
+
+# call_ai <prompt> <spinner_msg> → stdout, returns 0 on success
+call_ai() {
+    local prompt="$1"
+    local spinner_msg="$2"
+
+    if [[ "$NO_AI" == true ]]; then
+        return 1
+    fi
+
+    local result=""
+
+    if [[ "$PROVIDER" == "claude" ]]; then
+        if ! command -v claude &>/dev/null; then
+            warn "claude CLI not found — skipping AI"
+            return 1
+        fi
+        spinner_start "$spinner_msg"
+        result=$(unset CLAUDECODE; printf '%s' "$prompt" | claude -p --model sonnet 2>/dev/null) || true
+        spinner_stop
+    elif [[ "$PROVIDER" == "openai" ]]; then
+        if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            warn "OPENAI_API_KEY not set — skipping AI"
+            return 1
+        fi
+        spinner_start "$spinner_msg"
+        local escaped_prompt
+        escaped_prompt=$(printf '%s' "$prompt" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+        local response
+        response=$(curl -s https://api.openai.com/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -d "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":${escaped_prompt}}],\"temperature\":0.7}") || true
+        spinner_stop
+        if command -v jq &>/dev/null; then
+            result=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+        fi
+    fi
+
+    if [[ -n "$result" ]]; then
+        echo "$result"
+        return 0
+    fi
+    return 1
+}
 
 generate_summary() {
     local commits="$1"
     local mode="${ARG_MODE:-$DEFAULT_MODE}"
 
-    # Only generate if mode requires it
-    if [[ "$mode" != "summary" && "$mode" != "all" ]]; then
-        return
-    fi
-
-    if [[ -z "$commits" ]]; then
-        return
-    fi
+    [[ "$mode" != "summary" && "$mode" != "all" ]] && return
+    [[ -z "$commits" ]] && return
 
     local messages
-    messages=$(echo "$commits" | cut -f2)
-
-    # Truncate if too many commits
-    local msg_count
-    msg_count=$(echo "$messages" | wc -l | tr -d ' ')
-    if [[ $msg_count -gt 200 ]]; then
-        warn "Truncating to 200 commits for AI summary"
-        messages=$(echo "$messages" | head -200)
-    fi
+    messages=$(echo "$commits" | cut -f2 | _truncate_messages 200)
 
     local prompt
     prompt="You are writing a professional monthly work recap. Below are git commit messages from a developer for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
@@ -461,59 +637,23 @@ Write a concise summary (3-5 sentences) suitable for a monthly report. Synthesiz
 Commit messages:
 ${messages}"
 
-    local summary=""
-
-    if [[ "$PROVIDER" == "claude" ]]; then
-        if command -v claude &>/dev/null; then
-            spinner_start "Generating AI summary..."
-            summary=$(unset CLAUDECODE; printf '%s' "$prompt" | claude -p --model sonnet 2>/dev/null) || true
-            spinner_stop
-        else
-            warn "claude CLI not found — skipping AI summary"
-        fi
-    elif [[ "$PROVIDER" == "openai" ]]; then
-        if [[ -n "${OPENAI_API_KEY:-}" ]]; then
-            spinner_start "Generating AI summary..."
-            local escaped_prompt
-            escaped_prompt=$(printf '%s' "$prompt" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
-            local response
-            response=$(curl -s https://api.openai.com/v1/chat/completions \
-                -H "Content-Type: application/json" \
-                -H "Authorization: Bearer $OPENAI_API_KEY" \
-                -d "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":${escaped_prompt}}],\"temperature\":0.7}") || true
-            spinner_stop
-            if command -v jq &>/dev/null; then
-                summary=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
-            fi
-        else
-            warn "OPENAI_API_KEY not set — skipping AI summary"
-        fi
-    fi
-
-    if [[ -n "$summary" ]]; then
+    local summary
+    if summary=$(call_ai "$prompt" "Generating AI summary..."); then
         echo "$summary"
     else
         warn "AI summary generation failed — skipping"
     fi
 }
 
-# ==============================================================================
-# Generate bullet points (AI)
-# ==============================================================================
-
 generate_ai_bullets() {
     local commits="$1"
     local mode="${ARG_MODE:-$DEFAULT_MODE}"
 
-    # Only generate if mode requires it
-    if [[ "$mode" != "bullets" && "$mode" != "all" ]]; then
-        return
-    fi
-
+    [[ "$mode" != "bullets" && "$mode" != "all" ]] && return
     [[ -z "$commits" ]] && return
 
     local messages
-    messages=$(echo "$commits" | cut -f2)
+    messages=$(echo "$commits" | cut -f2 | _truncate_messages 200)
 
     local prompt
     prompt="You are writing bullet points for a monthly work recap. Below are git commit messages from a developer for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
@@ -529,37 +669,83 @@ Transform these commit messages into clean, readable bullet points for a report:
 Commit messages:
 ${messages}"
 
-    local bullets=""
-
-    if [[ "$PROVIDER" == "claude" ]]; then
-        if command -v claude &>/dev/null; then
-            spinner_start "Generating AI bullet points..."
-            bullets=$(unset CLAUDECODE; printf '%s' "$prompt" | claude -p --model sonnet 2>/dev/null) || true
-            spinner_stop
-        fi
-    elif [[ "$PROVIDER" == "openai" ]]; then
-        if [[ -n "${OPENAI_API_KEY:-}" ]]; then
-            spinner_start "Generating AI bullet points..."
-            local escaped_prompt
-            escaped_prompt=$(printf '%s' "$prompt" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
-            local response
-            response=$(curl -s https://api.openai.com/v1/chat/completions \
-                -H "Content-Type: application/json" \
-                -H "Authorization: Bearer $OPENAI_API_KEY" \
-                -d "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":${escaped_prompt}}],\"temperature\":0.7}") || true
-            spinner_stop
-            if command -v jq &>/dev/null; then
-                bullets=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
-            fi
-        fi
-    fi
-
-    if [[ -n "$bullets" ]]; then
-        echo "$bullets"
+    local bullets
+    if bullets=$(call_ai "$prompt" "Generating AI bullet points..."); then
+        echo "$bullets" | _strip_bullet_markers
     else
         # Fallback: raw commit messages
         echo "$messages"
     fi
+}
+
+# Single AI call for mode=all (summary + bullets in one request)
+# Sets AI_SUMMARY and AI_BULLETS globals, returns 0 on success
+generate_ai_combined() {
+    local commits="$1"
+    [[ -z "$commits" ]] && return 1
+
+    local messages
+    messages=$(echo "$commits" | cut -f2 | _truncate_messages 200)
+
+    local prompt
+    prompt="You are writing a professional monthly work recap. Below are git commit messages from a developer for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
+
+PART 1 - SUMMARY:
+Write a concise summary (3-5 sentences) suitable for a monthly report. Synthesize by themes (features, bug fixes, refactoring, documentation, etc.). Use a professional tone. Do not list individual commits — provide a high-level overview.
+
+After the summary, output exactly this separator on its own line:
+---SPLIT---
+
+PART 2 - BULLET POINTS:
+Transform the commit messages into clean, readable bullet points:
+- Group related changes by theme
+- Deduplicate similar entries
+- Rephrase in clear, professional language
+- Remove conventional commit prefixes (feat:, fix:, chore:, etc.)
+- Output one bullet point per line, without any bullet marker (no -, *, etc.)
+- Do not include any headers or categories — just the items
+
+Commit messages:
+${messages}"
+
+    local result
+    if result=$(call_ai "$prompt" "Generating AI recap..."); then
+        if [[ "$result" == *"---SPLIT---"* ]]; then
+            AI_SUMMARY=$(echo "$result" | sed -n '1,/---SPLIT---/{/---SPLIT---/!p}')
+            AI_BULLETS=$(echo "$result" | sed '1,/---SPLIT---/d' | _strip_bullet_markers)
+            if [[ -n "$AI_SUMMARY" && -n "$AI_BULLETS" ]]; then
+                return 0
+            fi
+        fi
+    fi
+    return 1
+}
+
+# ==============================================================================
+# Stats
+# ==============================================================================
+
+compute_stats() {
+    local commits="$1"
+    [[ -z "$commits" ]] && return
+
+    local total
+    total=$(echo "$commits" | wc -l | tr -d ' ')
+
+    local dates
+    dates=$(echo "$commits" | cut -f3 | sort)
+    local first_date last_date
+    first_date=$(echo "$dates" | head -1)
+    last_date=$(echo "$dates" | tail -1)
+
+    # Most active day
+    local busiest_line
+    busiest_line=$(echo "$dates" | sort | uniq -c | sort -rn | head -1)
+    local busiest_count busiest_day
+    busiest_count=$(echo "$busiest_line" | awk '{print $1}')
+    busiest_day=$(echo "$busiest_line" | awk '{print $2}')
+
+    printf '%s|%s|%s|%s|%s' "$total" "$first_date" "$last_date" "$busiest_day" "$busiest_count"
 }
 
 # ==============================================================================
@@ -570,14 +756,15 @@ format_output() {
     local commits="$1"
     local summary="$2"
     local bullets="$3"
+    local stats="$4"
     local format="${ARG_FORMAT:-$DEFAULT_FORMAT}"
     local mode="${ARG_MODE:-$DEFAULT_MODE}"
 
-    if [[ "$format" == "markdown" ]]; then
-        format_markdown "$commits" "$summary" "$mode" "$bullets"
-    else
-        format_text "$commits" "$summary" "$mode" "$bullets"
-    fi
+    case "$format" in
+        markdown) format_markdown "$commits" "$summary" "$mode" "$bullets" "$stats" ;;
+        json)     format_json "$commits" "$summary" "$mode" "$bullets" "$stats" ;;
+        *)        format_text "$commits" "$summary" "$mode" "$bullets" "$stats" ;;
+    esac
 }
 
 format_markdown() {
@@ -585,9 +772,24 @@ format_markdown() {
     local summary="$2"
     local mode="$3"
     local bullets="$4"
+    local stats="$5"
 
     echo "# Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL}"
     echo ""
+
+    if [[ -n "$stats" ]]; then
+        local total first_date last_date busiest_day busiest_count
+        IFS='|' read -r total first_date last_date busiest_day busiest_count <<< "$stats"
+        echo "## Stats"
+        echo ""
+        echo "| Metric | Value |"
+        echo "|--------|-------|"
+        echo "| Total commits | ${total} |"
+        echo "| First commit | ${first_date} |"
+        echo "| Last commit | ${last_date} |"
+        echo "| Busiest day | ${busiest_day} (${busiest_count} commits) |"
+        echo ""
+    fi
 
     if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$summary" ]]; then
         echo "## Summary"
@@ -601,7 +803,7 @@ format_markdown() {
             echo "## Changes"
             echo ""
             echo "$bullets" | while IFS= read -r line; do
-                echo "- ${line}"
+                [[ -n "$line" ]] && echo "- ${line}"
             done
             echo ""
         fi
@@ -614,7 +816,7 @@ format_markdown() {
             echo "| Hash | Message | Date |"
             echo "|------|---------|------|"
             echo "$commits" | while IFS=$'\t' read -r hash msg date; do
-                echo "| ${hash} | ${msg} | ${date} |"
+                echo "| [${hash}](https://github.com/${REPO_FULL}/commit/${hash}) | ${msg} | ${date} |"
             done
             echo ""
         fi
@@ -626,9 +828,22 @@ format_text() {
     local summary="$2"
     local mode="$3"
     local bullets="$4"
+    local stats="$5"
 
     echo "=== Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL} ==="
     echo ""
+
+    if [[ -n "$stats" ]]; then
+        local total first_date last_date busiest_day busiest_count
+        IFS='|' read -r total first_date last_date busiest_day busiest_count <<< "$stats"
+        echo "--- Stats ---"
+        echo ""
+        echo "  Total commits: ${total}"
+        echo "  First commit:  ${first_date}"
+        echo "  Last commit:   ${last_date}"
+        echo "  Busiest day:   ${busiest_day} (${busiest_count} commits)"
+        echo ""
+    fi
 
     if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$summary" ]]; then
         echo "--- Summary ---"
@@ -642,7 +857,7 @@ format_text() {
             echo "--- Changes ---"
             echo ""
             echo "$bullets" | while IFS= read -r line; do
-                printf '  \u2022 %s\n' "$line"
+                [[ -n "$line" ]] && printf '  \u2022 %s\n' "$line"
             done
             echo ""
         fi
@@ -658,6 +873,71 @@ format_text() {
             echo ""
         fi
     fi
+}
+
+format_json() {
+    local commits="$1"
+    local summary="$2"
+    local mode="$3"
+    local bullets="$4"
+    local stats="$5"
+
+    local total first_date last_date busiest_day busiest_count
+    if [[ -n "$stats" ]]; then
+        IFS='|' read -r total first_date last_date busiest_day busiest_count <<< "$stats"
+    else
+        total=0 first_date="" last_date="" busiest_day="" busiest_count=0
+    fi
+
+    local json
+    json=$(jq -n \
+        --arg repo "$REPO_FULL" \
+        --arg repo_name "$REPO_NAME" \
+        --arg period "$PERIOD_LABEL" \
+        --arg since "$SINCE" \
+        --arg until "$UNTIL" \
+        --arg user "$USER_NAME" \
+        --argjson total "${total:-0}" \
+        --arg first_date "${first_date:-}" \
+        --arg last_date "${last_date:-}" \
+        --arg busiest_day "${busiest_day:-}" \
+        --argjson busiest_count "${busiest_count:-0}" \
+        '{
+            repo: $repo,
+            repo_name: $repo_name,
+            period: $period,
+            since: $since,
+            until: $until,
+            user: $user,
+            stats: {
+                total_commits: $total,
+                first_date: $first_date,
+                last_date: $last_date,
+                busiest_day: $busiest_day,
+                busiest_day_commits: $busiest_count
+            }
+        }')
+
+    if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$summary" ]]; then
+        json=$(echo "$json" | jq --arg s "$summary" '. + {summary: $s}')
+    fi
+
+    if [[ ("$mode" == "bullets" || "$mode" == "all") && -n "$bullets" ]]; then
+        local bullets_arr
+        bullets_arr=$(echo "$bullets" | jq -R -s 'split("\n") | map(select(length > 0))')
+        json=$(echo "$json" | jq --argjson b "$bullets_arr" '. + {bullets: $b}')
+    fi
+
+    if [[ ("$mode" == "commits" || "$mode" == "all") && -n "$commits" ]]; then
+        local commits_arr
+        commits_arr=$(echo "$commits" | jq -R -s '
+            split("\n") | map(select(length > 0)) | map(
+                split("\t") | {hash: .[0], message: .[1], date: .[2]}
+            )')
+        json=$(echo "$json" | jq --argjson c "$commits_arr" '. + {commits: $c}')
+    fi
+
+    echo "$json"
 }
 
 # ==============================================================================
@@ -722,17 +1002,30 @@ main() {
     if [[ -z "$commits" ]]; then
         local format="${ARG_FORMAT:-$DEFAULT_FORMAT}"
         local output=""
-        if [[ "$format" == "markdown" ]]; then
-            output="# Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL}
+        case "$format" in
+            markdown)
+                output="# Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL}
 
 No commits found for **${USER_NAME}** during this period.
 "
-        else
-            output="=== Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL} ===
+                ;;
+            json)
+                output=$(jq -n \
+                    --arg repo "$REPO_FULL" \
+                    --arg repo_name "$REPO_NAME" \
+                    --arg period "$PERIOD_LABEL" \
+                    --arg since "$SINCE" \
+                    --arg until "$UNTIL" \
+                    --arg user "$USER_NAME" \
+                    '{repo: $repo, repo_name: $repo_name, period: $period, since: $since, until: $until, user: $user, commits: []}')
+                ;;
+            *)
+                output="=== Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL} ===
 
 No commits found for ${USER_NAME} during this period.
 "
-        fi
+                ;;
+        esac
         if [[ -n "$ARG_OUTPUT" ]]; then
             echo "$output" > "$ARG_OUTPUT"
             info "Output written to $ARG_OUTPUT"
@@ -742,17 +1035,32 @@ No commits found for ${USER_NAME} during this period.
         exit 0
     fi
 
-    # Generate summary
-    local summary=""
-    summary=$(generate_summary "$commits")
+    # Compute stats
+    local stats
+    stats=$(compute_stats "$commits")
 
-    # Generate bullets
-    local bullets=""
-    bullets=$(generate_ai_bullets "$commits")
+    # Generate AI content
+    local summary="" bullets=""
+    local mode="${ARG_MODE:-$DEFAULT_MODE}"
+
+    if [[ "$mode" == "all" && -n "$commits" ]]; then
+        AI_SUMMARY=""
+        AI_BULLETS=""
+        if generate_ai_combined "$commits"; then
+            summary="$AI_SUMMARY"
+            bullets="$AI_BULLETS"
+        else
+            summary=$(generate_summary "$commits")
+            bullets=$(generate_ai_bullets "$commits")
+        fi
+    else
+        summary=$(generate_summary "$commits")
+        bullets=$(generate_ai_bullets "$commits")
+    fi
 
     # Format output
     local output
-    output=$(format_output "$commits" "$summary" "$bullets")
+    output=$(format_output "$commits" "$summary" "$bullets" "$stats")
 
     # Write or print
     if [[ -n "$ARG_OUTPUT" ]]; then
