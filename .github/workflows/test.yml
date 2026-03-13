@@ -7,7 +7,23 @@ on:
     branches: [main]
 
 jobs:
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Shellcheck git-recap
+        run: shellcheck git-recap
+
+      - name: Shellcheck test-git-recap.sh
+        run: shellcheck test-git-recap.sh
+
   test:
+    name: Test (${{ matrix.os }})
     strategy:
       matrix:
         os: [macos-latest, ubuntu-latest]

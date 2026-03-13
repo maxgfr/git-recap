@@ -22,6 +22,7 @@ ARG_FORMAT=""
 ARG_OUTPUT=""
 ARG_BRANCH=""
 ARG_PROVIDER=""
+ARG_MODEL=""
 ARG_REPO=""
 ARG_INIT=false
 NO_AI=false
@@ -36,6 +37,7 @@ SINCE=""
 UNTIL=""
 PERIOD_LABEL=""
 PROVIDER=""
+MODEL=""
 SPINNER_PID=""
 AI_SUMMARY=""
 AI_BULLETS=""
@@ -182,6 +184,16 @@ _truncate_messages() {
     fi
 }
 
+_json_escape() {
+    if command -v jq &>/dev/null; then
+        jq -Rs .
+    elif command -v python3 &>/dev/null; then
+        python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
+    else
+        die "jq or python3 required for AI API calls"
+    fi
+}
+
 # ==============================================================================
 # Help
 # ==============================================================================
@@ -203,16 +215,26 @@ Options:
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
   -b, --branch <branch>   Branch (default: auto-detected)
-  --provider <provider>   AI provider: claude, openai (default: claude)
+  --provider <provider>   AI provider: claude, openai, mistral, gemini (default: claude)
+  --model <model>         AI model override (defaults: haiku for claude, gpt-4o-mini
+                          for openai, mistral-small-latest, gemini-2.0-flash)
   --no-ai                 Skip AI generation (summary/bullets)
   --init                  Initialize configuration
   -h, --help              Show this help
   -v, --version           Show version
 
+Environment variables:
+  OPENAI_API_KEY          Required for --provider openai
+  MISTRAL_API_KEY         Required for --provider mistral
+  GEMINI_API_KEY          Required for --provider gemini
+
 Examples:
   git-recap maxgfr/subtool
   git-recap -p last -f markdown -o recap.md maxgfr/subtool
   git-recap -p 2026-01 -m commits maxgfr/subtool
+  git-recap --provider openai --model gpt-4o maxgfr/subtool
+  git-recap --provider mistral maxgfr/subtool
+  git-recap --provider gemini maxgfr/subtool
   git-recap https://github.com/maxgfr/subtool
   git-recap git@github.com:maxgfr/subtool.git
   git-recap -f json -m commits maxgfr/subtool | jq .
@@ -235,6 +257,7 @@ parse_args() {
             -o|--output)  ARG_OUTPUT="${2:?Missing value for $1}"; shift 2 ;;
             -b|--branch)  ARG_BRANCH="${2:?Missing value for $1}"; shift 2 ;;
             --provider)   ARG_PROVIDER="${2:?Missing value for $1}"; shift 2 ;;
+            --model)      ARG_MODEL="${2:?Missing value for $1}"; shift 2 ;;
             --no-ai)      NO_AI=true; shift ;;
             --init)       ARG_INIT=true; shift ;;
             -h|--help)    show_help; exit 0 ;;
@@ -263,8 +286,8 @@ validate_args() {
     esac
 
     case "$provider" in
-        claude|openai) ;;
-        *) die "Invalid provider: $provider (expected: claude, openai)" ;;
+        claude|openai|mistral|gemini) ;;
+        *) die "Invalid provider: $provider (expected: claude, openai, mistral, gemini)" ;;
     esac
 
     if [[ "$ARG_INIT" == false && -z "$ARG_REPO" ]]; then
@@ -286,6 +309,8 @@ config_load() {
                 GIT_RECAP_USER="${BASH_REMATCH[1]}"
             elif [[ "$_line" =~ ^GIT_RECAP_PROVIDER=\"([^\"]*)\"$ ]]; then
                 GIT_RECAP_PROVIDER="${BASH_REMATCH[1]}"
+            elif [[ "$_line" =~ ^GIT_RECAP_MODEL=\"([^\"]*)\"$ ]]; then
+                GIT_RECAP_MODEL="${BASH_REMATCH[1]}"
             elif [[ "$_line" =~ ^GIT_RECAP_FORMAT=\"([^\"]*)\"$ ]]; then
                 GIT_RECAP_FORMAT="${BASH_REMATCH[1]}"
             else
@@ -322,12 +347,16 @@ config_init() {
     fi
 
     local provider=""
-    printf "AI provider (claude/openai) [claude]: " >&2
+    printf "AI provider (claude/openai/mistral/gemini) [claude]: " >&2
     read -r provider
     [[ -z "$provider" ]] && provider="claude"
 
+    local ai_model=""
+    printf "AI model (leave empty for provider default): " >&2
+    read -r ai_model
+
     local default_format=""
-    printf "Default format (text/markdown) [text]: " >&2
+    printf "Default format (text/markdown/json) [text]: " >&2
     read -r default_format
     [[ -z "$default_format" ]] && default_format="text"
 
@@ -335,6 +364,7 @@ config_init() {
 # git-recap configuration
 GIT_RECAP_USER="$user"
 GIT_RECAP_PROVIDER="$provider"
+GIT_RECAP_MODEL="$ai_model"
 GIT_RECAP_FORMAT="$default_format"
 EOF
 
@@ -490,13 +520,20 @@ check_dependencies() {
     if [[ "$NO_AI" == false ]]; then
         local mode="${ARG_MODE:-$DEFAULT_MODE}"
         if [[ "$mode" == "summary" || "$mode" == "bullets" || "$mode" == "all" ]]; then
-            local provider="${PROVIDER:-$DEFAULT_PROVIDER}"
-            if [[ "$provider" == "claude" ]] && ! command -v claude &>/dev/null; then
-                warn "claude CLI not found — AI summary will be skipped"
-            fi
-            if [[ "$provider" == "openai" ]] && [[ -z "${OPENAI_API_KEY:-}" ]]; then
-                warn "OPENAI_API_KEY not set — AI summary will be skipped"
-            fi
+            case "$PROVIDER" in
+                claude)
+                    command -v claude &>/dev/null || warn "claude CLI not found — AI will be skipped"
+                    ;;
+                openai)
+                    [[ -n "${OPENAI_API_KEY:-}" ]] || warn "OPENAI_API_KEY not set — AI will be skipped"
+                    ;;
+                mistral)
+                    [[ -n "${MISTRAL_API_KEY:-}" ]] || warn "MISTRAL_API_KEY not set — AI will be skipped"
+                    ;;
+                gemini)
+                    [[ -n "${GEMINI_API_KEY:-}" ]] || warn "GEMINI_API_KEY not set — AI will be skipped"
+                    ;;
+            esac
         fi
     fi
 }
@@ -574,6 +611,35 @@ fetch_commits() {
 # AI
 # ==============================================================================
 
+# OpenAI-compatible API call (works for openai + mistral)
+_call_openai_compatible() {
+    local url="$1" api_key="$2" model="$3" prompt="$4"
+    local escaped_prompt
+    escaped_prompt=$(printf '%s' "$prompt" | _json_escape)
+    local response
+    response=$(curl -s "$url" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $api_key" \
+        -d "{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":${escaped_prompt}}],\"temperature\":0.7}") || true
+    if command -v jq &>/dev/null; then
+        echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true
+    fi
+}
+
+# Gemini API call
+_call_gemini() {
+    local api_key="$1" model="$2" prompt="$3"
+    local escaped_prompt
+    escaped_prompt=$(printf '%s' "$prompt" | _json_escape)
+    local response
+    response=$(curl -s "https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${api_key}" \
+        -H "Content-Type: application/json" \
+        -d "{\"contents\":[{\"parts\":[{\"text\":${escaped_prompt}}]}],\"generationConfig\":{\"temperature\":0.7}}") || true
+    if command -v jq &>/dev/null; then
+        echo "$response" | jq -r '.candidates[0].content.parts[0].text // empty' 2>/dev/null || true
+    fi
+}
+
 # call_ai <prompt> <spinner_msg> → stdout, returns 0 on success
 call_ai() {
     local prompt="$1"
@@ -584,33 +650,54 @@ call_ai() {
     fi
 
     local result=""
+    local model="$MODEL"
 
-    if [[ "$PROVIDER" == "claude" ]]; then
-        if ! command -v claude &>/dev/null; then
-            warn "claude CLI not found — skipping AI"
-            return 1
-        fi
-        spinner_start "$spinner_msg"
-        result=$(unset CLAUDECODE; printf '%s' "$prompt" | claude -p --model sonnet 2>/dev/null) || true
-        spinner_stop
-    elif [[ "$PROVIDER" == "openai" ]]; then
-        if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-            warn "OPENAI_API_KEY not set — skipping AI"
-            return 1
-        fi
-        spinner_start "$spinner_msg"
-        local escaped_prompt
-        escaped_prompt=$(printf '%s' "$prompt" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
-        local response
-        response=$(curl -s https://api.openai.com/v1/chat/completions \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $OPENAI_API_KEY" \
-            -d "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":${escaped_prompt}}],\"temperature\":0.7}") || true
-        spinner_stop
-        if command -v jq &>/dev/null; then
-            result=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
-        fi
-    fi
+    case "$PROVIDER" in
+        claude)
+            if ! command -v claude &>/dev/null; then
+                warn "claude CLI not found — skipping AI"
+                return 1
+            fi
+            [[ -z "$model" ]] && model="haiku"
+            spinner_start "$spinner_msg"
+            result=$(unset CLAUDECODE; printf '%s' "$prompt" | claude -p --model "$model" 2>/dev/null) || true
+            spinner_stop
+            ;;
+        openai)
+            if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+                warn "OPENAI_API_KEY not set — skipping AI"
+                return 1
+            fi
+            [[ -z "$model" ]] && model="gpt-4o-mini"
+            spinner_start "$spinner_msg"
+            result=$(_call_openai_compatible \
+                "https://api.openai.com/v1/chat/completions" \
+                "$OPENAI_API_KEY" "$model" "$prompt") || true
+            spinner_stop
+            ;;
+        mistral)
+            if [[ -z "${MISTRAL_API_KEY:-}" ]]; then
+                warn "MISTRAL_API_KEY not set — skipping AI"
+                return 1
+            fi
+            [[ -z "$model" ]] && model="mistral-small-latest"
+            spinner_start "$spinner_msg"
+            result=$(_call_openai_compatible \
+                "https://api.mistral.ai/v1/chat/completions" \
+                "$MISTRAL_API_KEY" "$model" "$prompt") || true
+            spinner_stop
+            ;;
+        gemini)
+            if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+                warn "GEMINI_API_KEY not set — skipping AI"
+                return 1
+            fi
+            [[ -z "$model" ]] && model="gemini-2.0-flash"
+            spinner_start "$spinner_msg"
+            result=$(_call_gemini "$GEMINI_API_KEY" "$model" "$prompt") || true
+            spinner_stop
+            ;;
+    esac
 
     if [[ -n "$result" ]]; then
         echo "$result"
@@ -976,6 +1063,15 @@ main() {
         PROVIDER="$GIT_RECAP_PROVIDER"
     else
         PROVIDER="$DEFAULT_PROVIDER"
+    fi
+
+    # Resolve model: CLI flag > config > empty (provider default)
+    if [[ -n "$ARG_MODEL" ]]; then
+        MODEL="$ARG_MODEL"
+    elif [[ -n "${GIT_RECAP_MODEL:-}" ]]; then
+        MODEL="$GIT_RECAP_MODEL"
+    else
+        MODEL=""
     fi
 
     # Resolve format from config if not set via CLI

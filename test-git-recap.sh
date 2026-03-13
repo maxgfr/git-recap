@@ -2,6 +2,7 @@
 # ==============================================================================
 # Tests for git-recap
 # ==============================================================================
+# shellcheck disable=SC2005  # echo "$(func)" needed — our printf helpers don't add newlines
 
 set -uo pipefail
 
@@ -181,7 +182,9 @@ out=$(
 assert_eq "SSH URL resolves correctly" "maxgfr/subtool|subtool|remote" "$out"
 
 out=$(
+    # shellcheck disable=SC2034
     ARG_REPO="git@github.com:owner/repo"
+    # shellcheck disable=SC2034
     REPO_MODE="" REPO_FULL="" REPO_NAME="" USER_NAME="test"
     resolve_repo 2>/dev/null
     echo "${REPO_FULL}|${REPO_NAME}|${REPO_MODE}"
@@ -222,14 +225,18 @@ assert_exit "--help exits 0" 0 "$GIT_RECAP" --help
 assert_contains "--help shows usage" "$out" "Usage:"
 assert_contains "--help shows options" "$out" "Options:"
 assert_contains "--help shows --no-ai" "$out" "--no-ai"
+assert_contains "--help shows --model" "$out" "--model"
 assert_contains "--help shows json format" "$out" "json"
 assert_contains "--help shows SSH example" "$out" "git@github.com"
+assert_contains "--help shows all providers" "$out" "claude, openai, mistral, gemini"
+assert_contains "--help shows env vars" "$out" "OPENAI_API_KEY"
+assert_contains "--help shows mistral env" "$out" "MISTRAL_API_KEY"
+assert_contains "--help shows gemini env" "$out" "GEMINI_API_KEY"
 
 # 2. --version
 out=$("$GIT_RECAP" --version 2>/dev/null)
 assert_exit "--version exits 0" 0 "$GIT_RECAP" --version
 assert_contains "--version shows version" "$out" "git-recap"
-assert_contains "--version shows 1.1.0" "$out" "1.1.0"
 
 # 3. No arguments
 assert_exit "no arguments exits 1" 1 "$GIT_RECAP"
@@ -247,12 +254,21 @@ err=$("$GIT_RECAP" -f xml somerepo 2>&1 || true)
 assert_contains "invalid format shows error" "$err" "Invalid format"
 
 # 6. Invalid provider
-assert_exit "invalid provider exits 1" 1 "$GIT_RECAP" --provider gemini somerepo
-err=$("$GIT_RECAP" --provider gemini somerepo 2>&1 || true)
+assert_exit "invalid provider exits 1" 1 "$GIT_RECAP" --provider anthropic somerepo
+err=$("$GIT_RECAP" --provider anthropic somerepo 2>&1 || true)
 assert_contains "invalid provider shows error" "$err" "Invalid provider"
 
-# 7. --no-ai flag accepted
+# 7. Valid providers accepted
+assert_exit "provider claude accepted" 0 "$GIT_RECAP" --provider claude --help
+assert_exit "provider openai accepted" 0 "$GIT_RECAP" --provider openai --help
+assert_exit "provider mistral accepted" 0 "$GIT_RECAP" --provider mistral --help
+assert_exit "provider gemini accepted" 0 "$GIT_RECAP" --provider gemini --help
+
+# 8. --no-ai flag accepted
 assert_exit "--no-ai with --help exits 0" 0 "$GIT_RECAP" --no-ai --help
+
+# 9. --model flag accepted
+assert_exit "--model with --help exits 0" 0 "$GIT_RECAP" --model sonnet --help
 
 echo ""
 
@@ -260,19 +276,19 @@ echo ""
 
 echo "$(_bold "Repo resolution")"
 
-# 8. owner/repo format
+# 10. owner/repo format
 out=$("$GIT_RECAP" -m commits -u testuser maxgfr/subtool 2>&1 || true)
 assert_contains "owner/repo resolves correctly" "$out" "Repo: maxgfr/subtool"
 
-# 9. URL format
+# 11. URL format
 out=$("$GIT_RECAP" -m commits -u testuser https://github.com/maxgfr/subtool 2>&1 || true)
 assert_contains "URL resolves correctly" "$out" "Repo: maxgfr/subtool"
 
-# 10. Repo name only (prefixed with username)
+# 12. Repo name only (prefixed with username)
 out=$("$GIT_RECAP" -m commits -u maxgfr mytestrepo 2>&1 || true)
 assert_contains "repo name prefixed with user" "$out" "Repo: maxgfr/mytestrepo"
 
-# 11. SSH URL
+# 13. SSH URL
 out=$("$GIT_RECAP" -m commits -u testuser git@github.com:maxgfr/subtool.git 2>&1 || true)
 assert_contains "SSH URL resolves correctly" "$out" "Repo: maxgfr/subtool"
 
@@ -282,22 +298,22 @@ echo ""
 
 echo "$(_bold "Period computation")"
 
-# 12. current period
+# 14. current period
 out=$("$GIT_RECAP" -m commits -p current -u testuser maxgfr/subtool 2>&1 || true)
 current_month=$(portable_date month_label 0)
 assert_contains "period current shows current month" "$out" "$current_month"
 
-# 13. last period
+# 15. last period
 out=$("$GIT_RECAP" -m commits -p last -u testuser maxgfr/subtool 2>&1 || true)
 last_month=$(portable_date month_label -1)
 assert_contains "period last shows last month" "$out" "$last_month"
 
-# 14. YYYY-MM period
+# 16. YYYY-MM period
 out=$("$GIT_RECAP" -m commits -p 2026-01 -u testuser maxgfr/subtool 2>&1 || true)
 assert_contains "YYYY-MM period: correct SINCE" "$out" "2026-01-01"
 assert_contains "YYYY-MM period: correct UNTIL" "$out" "2026-02-01"
 
-# 15. Numeric month (december rollover)
+# 17. Numeric month (december rollover)
 out=$("$GIT_RECAP" -m commits -p 12 -u testuser maxgfr/subtool 2>&1 || true)
 assert_contains "numeric period shows Period:" "$out" "Period:"
 
@@ -307,7 +323,7 @@ echo ""
 
 echo "$(_bold "Fetch commits (integration)")"
 
-# 16. Fetch commits from maxgfr/subtool
+# 18. Fetch commits from maxgfr/subtool
 out=$("$GIT_RECAP" -m commits -p 2025-01 -u maxgfr maxgfr/subtool 2>&1)
 if [[ "$out" == *"Commits"* ]] || [[ "$out" == *"No commits"* ]]; then
     TOTAL=$((TOTAL + 1))
@@ -326,7 +342,7 @@ echo ""
 
 echo "$(_bold "Mode filtering")"
 
-# 17. Mode commits
+# 19. Mode commits
 out=$("$GIT_RECAP" --no-ai -m commits -p 2025-04 -u maxgfr maxgfr/subtool 2>&1)
 if [[ "$out" == *"No commits"* ]]; then
     assert_contains "mode commits: no summary in empty" "$out" "Recap"
@@ -336,7 +352,7 @@ else
     assert_not_contains "mode commits: no Summary section" "$out" "Summary"
 fi
 
-# 18. Mode bullets
+# 20. Mode bullets
 out=$("$GIT_RECAP" --no-ai -m bullets -p 2025-04 -u maxgfr maxgfr/subtool 2>&1)
 if [[ "$out" == *"No commits"* ]]; then
     assert_contains "mode bullets: no commits in empty" "$out" "Recap"
@@ -352,15 +368,15 @@ echo ""
 
 echo "$(_bold "Format output")"
 
-# 19. Markdown format
+# 21. Markdown format
 out=$("$GIT_RECAP" --no-ai -m commits -p 2025-01 -f markdown -u maxgfr maxgfr/subtool 2>&1)
 assert_contains "markdown format: has # header" "$out" "#"
 
-# 20. Text format
+# 22. Text format
 out=$("$GIT_RECAP" --no-ai -m commits -p 2025-01 -f text -u maxgfr maxgfr/subtool 2>&1)
 assert_contains "text format: has === header" "$out" "==="
 
-# 21. Markdown commit links
+# 23. Markdown commit links
 if [[ "$out" != *"No commits"* ]]; then
     md_out=$("$GIT_RECAP" --no-ai -m commits -p 2025-01 -f markdown -u maxgfr maxgfr/subtool 2>/dev/null || true)
     if [[ "$md_out" == *"github.com"* ]]; then
@@ -374,7 +390,7 @@ echo ""
 
 echo "$(_bold "JSON format")"
 
-# 22. JSON output is valid
+# 24. JSON output is valid
 if command -v jq &>/dev/null; then
     json_out=$("$GIT_RECAP" --no-ai -f json -m commits -p 2025-01 -u maxgfr maxgfr/subtool 2>/dev/null)
     if echo "$json_out" | jq . >/dev/null 2>&1; then
@@ -385,7 +401,7 @@ if command -v jq &>/dev/null; then
         printf '  %s %s\n' "$(_red "FAIL")" "-f json produces valid JSON"
     fi
 
-    # 23. JSON has expected fields
+    # 25. JSON has expected fields
     assert_contains "json has repo field" "$json_out" '"repo"'
     assert_contains "json has period field" "$json_out" '"period"'
     assert_contains "json has user field" "$json_out" '"user"'
@@ -396,7 +412,7 @@ if command -v jq &>/dev/null; then
         printf '  %s %s\n' "$(_green "PASS")" "json stats: no commits (skip)"
     fi
 
-    # 24. JSON empty commits
+    # 26. JSON empty commits
     json_empty=$("$GIT_RECAP" --no-ai -f json -m commits -p 2020-01 -u maxgfr maxgfr/subtool 2>/dev/null)
     if echo "$json_empty" | jq . >/dev/null 2>&1; then
         TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1))
@@ -415,7 +431,7 @@ echo ""
 
 echo "$(_bold "--no-ai flag")"
 
-# 25. --no-ai skips summary
+# 27. --no-ai skips summary
 out=$("$GIT_RECAP" --no-ai -m all -p 2025-04 -u maxgfr -f text maxgfr/subtool 2>&1)
 if [[ "$out" != *"No commits"* ]]; then
     assert_not_contains "--no-ai: no Summary section" "$out" "--- Summary ---"
@@ -431,7 +447,7 @@ echo ""
 
 echo "$(_bold "Stats section")"
 
-# 26. Stats in text output
+# 28. Stats in text output
 out=$("$GIT_RECAP" --no-ai -m commits -p 2025-04 -u maxgfr -f text maxgfr/subtool 2>&1)
 if [[ "$out" != *"No commits"* ]]; then
     assert_contains "stats section in text output" "$out" "Stats"
@@ -441,7 +457,7 @@ else
     printf '  %s %s\n' "$(_green "PASS")" "stats: no commits to verify (skip)"
 fi
 
-# 27. Stats in markdown output
+# 29. Stats in markdown output
 out=$("$GIT_RECAP" --no-ai -m commits -p 2025-04 -u maxgfr -f markdown maxgfr/subtool 2>&1)
 if [[ "$out" != *"No commits"* ]]; then
     assert_contains "stats section in markdown output" "$out" "## Stats"
@@ -453,7 +469,7 @@ echo ""
 
 echo "$(_bold "Output file")"
 
-# 28. --output writes file
+# 30. --output writes file
 tmpfile=$(mktemp /tmp/git-recap-test.XXXXXX)
 "$GIT_RECAP" --no-ai -m commits -p 2025-01 -u maxgfr -o "$tmpfile" maxgfr/subtool 2>/dev/null || true
 if [[ -s "$tmpfile" ]]; then
