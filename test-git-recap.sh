@@ -203,13 +203,17 @@ assert_contains "stats total=3" "$out" "3|"
 assert_contains "stats first date" "$out" "2026-03-01"
 assert_contains "stats last date" "$out" "2026-03-15"
 assert_contains "stats busiest day is 2026-03-01" "$out" "|2026-03-01|"
-assert_contains "stats busiest count is 2" "$out" "|2"
+assert_contains "stats busiest count is 2" "$out" "|2|"
+assert_contains "stats active days=2" "$out" "|2|"
+assert_contains "stats avg per day=1.5" "$out" "|1.5"
 
 # Single commit
 input=$'abc1234\tonly commit\t2026-05-10'
 out=$(compute_stats "$input")
 assert_contains "single commit total=1" "$out" "1|"
 assert_contains "single commit date" "$out" "2026-05-10"
+assert_contains "single commit active days=1" "$out" "|1|"
+assert_contains "single commit avg per day=1.0" "$out" "|1.0"
 
 echo ""
 

@@ -1049,7 +1049,16 @@ compute_stats() {
     busiest_count=$(echo "$busiest_line" | awk '{print $1}')
     busiest_day=$(echo "$busiest_line" | awk '{print $2}')
 
-    printf '%s|%s|%s|%s|%s' "$total" "$first_date" "$last_date" "$busiest_day" "$busiest_count"
+    # Active days & average
+    local active_days avg_per_day
+    active_days=$(echo "$dates" | sort -u | wc -l | tr -d ' ')
+    if [[ "$active_days" -gt 0 ]]; then
+        avg_per_day=$(LANG=C LC_ALL=C awk "BEGIN {printf \"%.1f\", $total / $active_days}")
+    else
+        avg_per_day="0.0"
+    fi
+
+    printf '%s|%s|%s|%s|%s|%s|%s' "$total" "$first_date" "$last_date" "$busiest_day" "$busiest_count" "$active_days" "$avg_per_day"
 }
 
 # ==============================================================================
@@ -1082,13 +1091,15 @@ format_markdown() {
     echo ""
 
     if [[ -n "$stats" ]]; then
-        local total first_date last_date busiest_day busiest_count
-        IFS='|' read -r total first_date last_date busiest_day busiest_count <<< "$stats"
+        local total first_date last_date busiest_day busiest_count active_days avg_per_day
+        IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day <<< "$stats"
         echo "## Stats"
         echo ""
         echo "| Metric | Value |"
         echo "|--------|-------|"
         echo "| Total commits | ${total} |"
+        echo "| Active days | ${active_days:-0} |"
+        echo "| Avg per day | ${avg_per_day:-0.0} |"
         echo "| First commit | ${first_date} |"
         echo "| Last commit | ${last_date} |"
         echo "| Busiest day | ${busiest_day} (${busiest_count} commits) |"
@@ -1117,10 +1128,10 @@ format_markdown() {
         if [[ -n "$commits" ]]; then
             echo "## Commits"
             echo ""
-            echo "| Hash | Message | Date |"
-            echo "|------|---------|------|"
+            echo "| Date | Hash | Message |"
+            echo "|------|------|---------|"
             echo "$commits" | while IFS=$'\t' read -r hash msg date; do
-                echo "| [${hash}](https://github.com/${REPO_FULL}/commit/${hash}) | ${msg} | ${date} |"
+                echo "| ${date} | [${hash}](https://github.com/${REPO_FULL}/commit/${hash}) | ${msg} |"
             done
             echo ""
         fi
@@ -1138,11 +1149,13 @@ format_text() {
     echo ""
 
     if [[ -n "$stats" ]]; then
-        local total first_date last_date busiest_day busiest_count
-        IFS='|' read -r total first_date last_date busiest_day busiest_count <<< "$stats"
+        local total first_date last_date busiest_day busiest_count active_days avg_per_day
+        IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day <<< "$stats"
         echo "--- Stats ---"
         echo ""
         echo "  Total commits: ${total}"
+        echo "  Active days:   ${active_days:-0}"
+        echo "  Avg per day:   ${avg_per_day:-0.0}"
         echo "  First commit:  ${first_date}"
         echo "  Last commit:   ${last_date}"
         echo "  Busiest day:   ${busiest_day} (${busiest_count} commits)"
@@ -1171,8 +1184,14 @@ format_text() {
         if [[ -n "$commits" ]]; then
             echo "--- Commits ---"
             echo ""
+            local prev_date=""
             echo "$commits" | while IFS=$'\t' read -r hash msg date; do
-                echo "  ${hash} - ${msg} (${date})"
+                if [[ "$date" != "$prev_date" ]]; then
+                    [[ -n "$prev_date" ]] && echo ""
+                    echo "  ${date}"
+                    prev_date="$date"
+                fi
+                echo "    ${hash}  ${msg}"
             done
             echo ""
         fi
@@ -1186,11 +1205,11 @@ format_json() {
     local bullets="$4"
     local stats="$5"
 
-    local total first_date last_date busiest_day busiest_count
+    local total first_date last_date busiest_day busiest_count active_days avg_per_day
     if [[ -n "$stats" ]]; then
-        IFS='|' read -r total first_date last_date busiest_day busiest_count <<< "$stats"
+        IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day <<< "$stats"
     else
-        total=0 first_date="" last_date="" busiest_day="" busiest_count=0
+        total=0 first_date="" last_date="" busiest_day="" busiest_count=0 active_days=0 avg_per_day="0.0"
     fi
 
     local json
@@ -1206,6 +1225,8 @@ format_json() {
         --arg last_date "${last_date:-}" \
         --arg busiest_day "${busiest_day:-}" \
         --argjson busiest_count "${busiest_count:-0}" \
+        --argjson active_days "${active_days:-0}" \
+        --argjson avg_per_day "${avg_per_day:-0.0}" \
         '{
             repo: $repo,
             repo_name: $repo_name,
@@ -1215,6 +1236,8 @@ format_json() {
             user: $user,
             stats: {
                 total_commits: $total,
+                active_days: $active_days,
+                avg_per_day: $avg_per_day,
                 first_date: $first_date,
                 last_date: $last_date,
                 busiest_day: $busiest_day,
