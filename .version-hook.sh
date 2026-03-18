@@ -4,5 +4,5 @@ if [ -z "$1" ]; then
   exit 1
 fi
 NEW_VERSION="$1"
-sed -i.bak "s/^VERSION=\".*\"/VERSION=\"$NEW_VERSION\"/" git-recap && rm git-recap.bak
-echo "Updated git-recap to version $NEW_VERSION"
+sed -i.bak "s/^VERSION=\".*\"/VERSION=\"$NEW_VERSION\"/" script.sh && rm script.sh.bak
+echo "Updated script.sh to version $NEW_VERSION"

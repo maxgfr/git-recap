@@ -15,7 +15,7 @@ brew install maxgfr/tap/git-recap
 ### Manual
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/maxgfr/git-recap/main/git-recap -o /usr/local/bin/git-recap
+curl -fsSL https://raw.githubusercontent.com/maxgfr/git-recap/main/script.sh -o /usr/local/bin/git-recap
 chmod +x /usr/local/bin/git-recap
 ```
 
@@ -51,7 +51,11 @@ Options:
   --provider <provider>   AI provider: claude, claude-api, openai, mistral, gemini (default: claude)
   --model <model>         AI model override (see defaults below)
   --lang <lang>           Language for AI output: en, fr, es, de, ... (default: en)
-  --voice <voice>         Narrative voice: I or we (default: I)
+  --voice <voice>         Narrative voice: I, we, neutral, or nominal (default: neutral)
+                          neutral: noun-based English ("Implementation of...")
+                          nominal: noun-based French ("Mise en place de...")
+  --team                  Team mode: all contributors, grouped by author
+  --all-branches          Fetch commits from all branches
   --no-ai                 Skip AI generation (summary/bullets)
   --init                  Initialize configuration
   -h, --help              Show this help
@@ -97,14 +101,35 @@ git-recap --provider gemini --model gemini-1.5-pro maxgfr/subtool
 Control the language and narrative voice of AI-generated content:
 
 ```bash
-# French output, first person
+# Default: noun-based neutral style ("Implementation of...", "Optimization of...")
+git-recap maxgfr/subtool
+
+# First person singular
+git-recap --voice I maxgfr/subtool
+
+# Team voice ("we implemented...", "we fixed...")
+git-recap --voice we maxgfr/subtool
+
+# Noun-based French style ("Mise en place de...", "Optimisation de...")
+git-recap --voice nominal maxgfr/subtool
+
+# French language output
 git-recap --lang fr maxgfr/subtool
+```
 
-# English, team voice ("we implemented...", "we fixed...")
-git-recap --lang en --voice we maxgfr/subtool
+### Team Mode
 
-# French, first person singular ("j'ai implémenté...", "j'ai corrigé...")
-git-recap --lang fr --voice I maxgfr/subtool
+Generate a recap for all contributors, grouped by author:
+
+```bash
+# Team recap on default branch
+git-recap --team maxgfr/subtool
+
+# Team recap, all branches, markdown output
+git-recap --team --all-branches -f markdown -o recap.md maxgfr/subtool
+
+# Team recap on a specific branch
+git-recap --team -b develop maxgfr/subtool
 ```
 
 ## Examples
@@ -143,8 +168,11 @@ git-recap -f json -m commits maxgfr/subtool | jq .
 # No AI, just raw data
 git-recap --no-ai -m all maxgfr/subtool
 
-# French recap, first person
-git-recap --lang fr --voice I maxgfr/subtool
+# Team mode
+git-recap --team maxgfr/subtool
+
+# French recap
+git-recap --lang fr maxgfr/subtool
 
 # From various URL formats
 git-recap https://github.com/maxgfr/subtool
@@ -199,7 +227,7 @@ GIT_RECAP_PROVIDER="claude"
 GIT_RECAP_MODEL=""
 GIT_RECAP_FORMAT="text"
 GIT_RECAP_LANG="en"
-GIT_RECAP_VOICE="I"
+GIT_RECAP_VOICE="neutral"
 ```
 
 ## License

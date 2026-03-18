@@ -16,8 +16,8 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
 
-      - name: Shellcheck git-recap
-        run: shellcheck git-recap
+      - name: Shellcheck script.sh
+        run: shellcheck script.sh
 
       - name: Shellcheck test-git-recap.sh
         run: shellcheck test-git-recap.sh
@@ -36,7 +36,7 @@ jobs:
         run: sudo apt-get install -y jq
 
       - name: Make script executable
-        run: chmod +x git-recap test-git-recap.sh
+        run: chmod +x script.sh test-git-recap.sh
 
       - name: Run tests
         run: bash test-git-recap.sh

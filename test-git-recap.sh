@@ -7,7 +7,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GIT_RECAP="${SCRIPT_DIR}/git-recap"
+GIT_RECAP="${SCRIPT_DIR}/script.sh"
 
 PASS=0
 FAIL=0

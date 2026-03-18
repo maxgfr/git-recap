@@ -14,7 +14,7 @@ DEFAULT_MODE="all"
 DEFAULT_FORMAT="text"
 DEFAULT_PROVIDER="claude"
 DEFAULT_LANG="en"
-DEFAULT_VOICE="I"
+DEFAULT_VOICE="neutral"
 
 # State
 ARG_USER=""
@@ -225,7 +225,7 @@ _voice_instruction() {
         I|i|je)   echo "Write from a first-person singular perspective, using 'I'. Present the work as your own accomplishments." ;;
         we|We|nous) echo "Write from a first-person plural perspective, using 'we'. Present the work as team accomplishments." ;;
         neutral) echo "Use a noun-based impersonal style. Each item should start with an action noun (e.g., 'Implementation of the home page', 'Optimization of build times', 'Setup of CI/CD pipeline'). Never use first-person pronouns (I, we). Keep it professional and concise." ;;
-        nominal|neutre) echo "Use a French-style noun-based impersonal style (style nominal). Each item should start with an action noun (e.g., 'Mise en place de la page d'accueil', 'Optimisation des temps de build', 'Intégration des retours designer', 'Déploiement de la nouvelle version'). Never use first-person pronouns (je, nous, j'ai). Keep it professional, concise and suitable for a project status report." ;;
+        nominal) echo "Use a French-style noun-based impersonal style (style nominal). Each item should start with an action noun (e.g., 'Mise en place de la page d'accueil', 'Optimisation des temps de build', 'Intégration des retours designer', 'Déploiement de la nouvelle version'). Never use first-person pronouns (je, nous, j'ai). Keep it professional, concise and suitable for a project status report." ;;
     esac
 }
 
@@ -260,9 +260,9 @@ Usage:
                           claude-haiku-4-5-20251001 for claude-api, gpt-4o-mini
                           for openai, mistral-small-latest, gemini-2.0-flash)
   --lang <lang>           Language for AI output: en, fr, es, de, ... (default: en)
-  --voice <voice>         Narrative voice: I, we, neutral, or nominal (default: I)
+  --voice <voice>         Narrative voice: I, we, neutral, or nominal (default: neutral)
                           neutral: noun-based English ("Implementation of...")
-                          nominal/neutre: noun-based French ("Mise en place de...")
+                          nominal: noun-based French ("Mise en place de...")
   --team                  Team mode: recap for all contributors grouped by author
                           (defaults voice to neutral, includes global team summary)
   --all-branches          Fetch commits from all branches (not just default/specified)
@@ -389,7 +389,7 @@ validate_args() {
 
     local voice="${ARG_VOICE:-$DEFAULT_VOICE}"
     case "$voice" in
-        I|i|je|we|We|nous|neutral|neutre|nominal) ;;
+        I|i|je|we|We|nous|neutral|nominal) ;;
         *) die "Invalid voice: $voice (expected: I, we, neutral, or nominal)" ;;
     esac
 
@@ -473,9 +473,9 @@ config_init() {
     [[ -z "$lang" ]] && lang="en"
 
     local voice=""
-    printf "Narrative voice (I/we) [I]: " >&2
+    printf "Narrative voice (I/we/neutral/nominal) [neutral]: " >&2
     read -r voice
-    [[ -z "$voice" ]] && voice="I"
+    [[ -z "$voice" ]] && voice="neutral"
 
     cat > "$CONFIG_FILE" <<EOF
 # git-recap configuration
@@ -2076,7 +2076,6 @@ main() {
     case "$VOICE_MODE" in
         je|i) VOICE_MODE="I" ;;
         nous|We) VOICE_MODE="we" ;;
-        neutre) VOICE_MODE="nominal" ;;
     esac
 
     # Default voice to neutral/nominal in team mode (unless user explicitly set a voice)

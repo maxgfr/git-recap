@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-Single bash script (`git-recap`, ~1100 lines) that generates monthly commit recaps with optional AI-powered summaries and bullet points. Supports multiple AI providers.
+Single bash script (`script.sh`, ~1800 lines) that generates monthly commit recaps with optional AI-powered summaries and bullet points. Supports multiple AI providers.
 
 ## Architecture
 
-- **One file**: `git-recap` — everything is in this script
+- **One file**: `script.sh` — everything is in this script
 - **Config**: `~/.git-recaprc` (parsed securely with regex, no `source`)
 - **Tests**: `test-git-recap.sh` (unit + integration, ~80 tests)
 
@@ -44,7 +44,7 @@ Shared helpers: `_call_openai_compatible()` (openai + mistral), `_call_anthropic
 - `--model <model>` — override default model per provider
 - `--no-ai` — skip AI entirely, raw commit messages as bullets
 - `--lang <en|fr|...>` — language for AI output
-- `--voice <I|we|neutral|nominal>` — narrative voice (I, we, neutral=English noun-based, nominal/neutre=French noun-based)
+- `--voice <I|we|neutral|nominal>` — narrative voice (I, we, neutral=English noun-based, nominal=French noun-based)
 - `--team` — team mode: all contributors grouped by author (global + per-dev summaries, defaults voice to neutral)
 - `--all-branches` — fetch commits from all branches (not just default/specified)
 - `-f <text|markdown|json>` — output format
