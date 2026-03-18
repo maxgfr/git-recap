@@ -44,7 +44,9 @@ Shared helpers: `_call_openai_compatible()` (openai + mistral), `_call_anthropic
 - `--model <model>` — override default model per provider
 - `--no-ai` — skip AI entirely, raw commit messages as bullets
 - `--lang <en|fr|...>` — language for AI output
-- `--voice <I|we>` — narrative voice (first person or team)
+- `--voice <I|we|neutral|nominal>` — narrative voice (I, we, neutral=English noun-based, nominal/neutre=French noun-based)
+- `--team` — team mode: all contributors grouped by author (global + per-dev summaries, defaults voice to neutral)
+- `--all-branches` — fetch commits from all branches (not just default/specified)
 - `-f <text|markdown|json>` — output format
 - `-m <summary|commits|bullets|all>` — what to include
 - `-p <current-month|last-month|current-week|last-week|current-year|last-year|all|N|YYYY-MM|YYYY>` — period
