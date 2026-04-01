@@ -1138,8 +1138,8 @@ generate_ai_bullets() {
     prompt="You are writing bullet points for a work recap. Below are git commit messages for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
 
 Transform these commit messages into clean, readable bullet points for a report:
-- Group related changes by theme
-- Deduplicate similar entries
+- One bullet point per commit, preserving the order of the commit messages below
+- Do not group, merge, or deduplicate entries — every commit must appear
 - Rephrase in clear, professional language
 - Remove conventional commit prefixes (feat:, fix:, chore:, etc.)
 - Output one bullet point per line, without any bullet marker (no -, *, etc.)
@@ -1184,8 +1184,8 @@ After the summary, output exactly this separator on its own line:
 
 PART 2 - BULLET POINTS:
 Transform the commit messages into clean, readable bullet points:
-- Group related changes by theme
-- Deduplicate similar entries
+- One bullet point per commit, preserving the order of the commit messages below
+- Do not group, merge, or deduplicate entries — every commit must appear
 - Rephrase in clear, professional language
 - Remove conventional commit prefixes (feat:, fix:, chore:, etc.)
 - Output one bullet point per line, without any bullet marker (no -, *, etc.)
