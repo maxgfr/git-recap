@@ -5,7 +5,7 @@ set -euo pipefail
 # git-recap — Monthly commit recap CLI
 # ==============================================================================
 
-VERSION="1.6.2"
+VERSION="1.7.0"
 CONFIG_FILE="$HOME/.git-recaprc"
 
 # Defaults
