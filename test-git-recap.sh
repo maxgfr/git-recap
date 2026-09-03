@@ -232,7 +232,7 @@ assert_contains "--help shows --no-ai" "$out" "--no-ai"
 assert_contains "--help shows --model" "$out" "--model"
 assert_contains "--help shows json format" "$out" "json"
 assert_contains "--help shows SSH example" "$out" "git@github.com"
-assert_contains "--help shows all providers" "$out" "claude, claude-api, openai, mistral, gemini"
+assert_contains "--help shows all providers" "$out" "claude, codex, claude-api, openai, mistral, gemini"
 assert_contains "--help shows env vars" "$out" "OPENAI_API_KEY"
 assert_contains "--help shows anthropic env" "$out" "ANTHROPIC_API_KEY"
 assert_contains "--help shows mistral env" "$out" "MISTRAL_API_KEY"
@@ -265,6 +265,7 @@ assert_contains "invalid provider shows error" "$err" "Invalid provider"
 
 # 7. Valid providers accepted
 assert_exit "provider claude accepted" 0 "$GIT_RECAP" --provider claude --help
+assert_exit "provider codex accepted" 0 "$GIT_RECAP" --provider codex --help
 assert_exit "provider claude-api accepted" 0 "$GIT_RECAP" --provider claude-api --help
 assert_exit "provider openai accepted" 0 "$GIT_RECAP" --provider openai --help
 assert_exit "provider mistral accepted" 0 "$GIT_RECAP" --provider mistral --help
@@ -298,28 +299,69 @@ assert_contains "repo name prefixed with user" "$out" "Repo: maxgfr/mytestrepo"
 out=$("$GIT_RECAP" -m commits -u testuser git@github.com:maxgfr/subtool.git 2>&1 || true)
 assert_contains "SSH URL resolves correctly" "$out" "Repo: maxgfr/subtool"
 
+# 14. Local repository without an origin uses its current branch
+local_repo=$(mktemp -d /tmp/git-recap-local.XXXXXX)
+git -C "$local_repo" init -q -b master
+git -C "$local_repo" config user.name "Recap Tester"
+git -C "$local_repo" config user.email "recap@example.invalid"
+git -C "$local_repo" commit -q --allow-empty -m "feat: local-only commit"
+out=$("$GIT_RECAP" --no-ai -m commits -p all -u "Recap Tester" "$local_repo" 2>&1)
+assert_contains "local repo without origin is accepted" "$out" "Local repo:"
+assert_contains "local repo uses current branch" "$out" "Branch: master"
+assert_contains "local repo returns its commits" "$out" "local-only commit"
+
+mkdir -p "$local_repo/empty-home"
+out=$(HOME="$local_repo/empty-home" "$GIT_RECAP" --no-ai -m commits -p all "$local_repo" 2>&1)
+assert_contains "local repo infers author from repository config" "$out" "User: Recap Tester"
+assert_contains "local repo without GitHub identity returns commits" "$out" "local-only commit"
+
+mkdir -p "$local_repo/docs"
+out=$("$GIT_RECAP" --no-ai -m commits -p all -u "Recap Tester" "$local_repo/docs" 2>&1)
+assert_contains "local repo subdirectory resolves to repository root" "$out" "Local repo: $(basename "$local_repo")"
+out=$("$GIT_RECAP" --no-ai -f markdown -m commits -p all -u "Recap Tester" "$local_repo" 2>&1)
+assert_not_contains "local-only markdown hash has no fabricated GitHub link" "$out" "https://github.com/$(basename "$local_repo")/commit/"
+
+# 15. Git worktrees are recognized as local repositories
+worktree_repo=$(mktemp -d /tmp/git-recap-worktree-base.XXXXXX)
+worktree_path=$(mktemp -d /tmp/git-recap-worktree.XXXXXX)
+rmdir "$worktree_path"
+git -C "$worktree_repo" init -q -b main
+git -C "$worktree_repo" config user.name "Recap Tester"
+git -C "$worktree_repo" config user.email "recap@example.invalid"
+git -C "$worktree_repo" commit -q --allow-empty -m "feat: base commit"
+git -C "$worktree_repo" worktree add -q -b feature "$worktree_path"
+git -C "$worktree_path" commit -q --allow-empty -m "feat: worktree commit"
+out=$("$GIT_RECAP" --no-ai -m commits -p all -u "Recap Tester" "$worktree_path" 2>&1)
+assert_contains "worktree is accepted as a local repo" "$out" "Local repo:"
+assert_contains "worktree uses its current branch" "$out" "Branch: feature"
+assert_contains "worktree returns its commits" "$out" "worktree commit"
+
+rm -rf "$local_repo"
+git -C "$worktree_repo" worktree remove --force "$worktree_path"
+rm -rf "$worktree_repo"
+
 echo ""
 
 # ---------- Period computation ----------
 
 echo "$(_bold "Period computation")"
 
-# 14. current period
+# 16. current period
 out=$("$GIT_RECAP" -m commits -p current -u testuser maxgfr/subtool 2>&1 || true)
 current_month=$(portable_date month_label 0)
 assert_contains "period current shows current month" "$out" "$current_month"
 
-# 15. last period
+# 17. last period
 out=$("$GIT_RECAP" -m commits -p last -u testuser maxgfr/subtool 2>&1 || true)
 last_month=$(portable_date month_label -1)
 assert_contains "period last shows last month" "$out" "$last_month"
 
-# 16. YYYY-MM period
+# 18. YYYY-MM period
 out=$("$GIT_RECAP" -m commits -p 2026-01 -u testuser maxgfr/subtool 2>&1 || true)
 assert_contains "YYYY-MM period: correct SINCE" "$out" "2026-01-01"
 assert_contains "YYYY-MM period: correct UNTIL" "$out" "2026-02-01"
 
-# 17. Numeric month (december rollover)
+# 19. Numeric month (december rollover)
 out=$("$GIT_RECAP" -m commits -p 12 -u testuser maxgfr/subtool 2>&1 || true)
 assert_contains "numeric period shows Period:" "$out" "Period:"
 
@@ -329,7 +371,7 @@ echo ""
 
 echo "$(_bold "Fetch commits (integration)")"
 
-# 18. Fetch commits from maxgfr/subtool
+# 20. Fetch commits from maxgfr/subtool
 out=$("$GIT_RECAP" -m commits -p 2025-01 -u maxgfr maxgfr/subtool 2>&1)
 if [[ "$out" == *"Commits"* ]] || [[ "$out" == *"No commits"* ]]; then
     TOTAL=$((TOTAL + 1))
@@ -341,6 +383,63 @@ else
     printf '  %s %s\n' "$(_red "FAIL")" "fetch commits returns data or empty"
     printf '    output: %s\n' "$(echo "$out" | head -5)"
 fi
+
+echo ""
+
+# ---------- Codex CLI provider ----------
+
+echo "$(_bold "Codex CLI provider")"
+
+codex_test_dir=$(mktemp -d /tmp/git-recap-codex.XXXXXX)
+mkdir -p "$codex_test_dir/bin" "$codex_test_dir/repo"
+git -C "$codex_test_dir/repo" init -q -b main
+git -C "$codex_test_dir/repo" config user.name "Recap Tester"
+git -C "$codex_test_dir/repo" config user.email "recap@example.invalid"
+git -C "$codex_test_dir/repo" commit -q --allow-empty -m "feat: codex recap input"
+
+cat > "$codex_test_dir/bin/codex" <<'MOCK_CODEX'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$CODEX_ARGS_FILE"
+cat > "$CODEX_STDIN_FILE"
+if [[ "${CODEX_FORCE_FAILURE:-false}" == "true" ]]; then
+    printf '%s\n' "PARTIAL CODEX OUTPUT"
+    exit 7
+fi
+printf '%s\n' "Codex generated summary." "---SPLIT---" "Codex generated bullet."
+MOCK_CODEX
+chmod +x "$codex_test_dir/bin/codex"
+
+out=$(CODEX_ARGS_FILE="$codex_test_dir/args" CODEX_STDIN_FILE="$codex_test_dir/stdin" \
+    PATH="$codex_test_dir/bin:$PATH" \
+    "$GIT_RECAP" --provider codex --model codex-test-model -m all -p all \
+    -u "Recap Tester" "$codex_test_dir/repo" 2>&1)
+codex_args=$(cat "$codex_test_dir/args")
+codex_stdin=$(cat "$codex_test_dir/stdin")
+assert_contains "codex provider returns generated summary" "$out" "Codex generated summary."
+assert_contains "codex provider returns generated bullets" "$out" "Codex generated bullet."
+assert_contains "text output renders a bullet character" "$out" "• Codex generated bullet."
+assert_not_contains "text output does not print a Unicode escape literally" "$out" '\u2022'
+assert_contains "codex provider uses exec" "$codex_args" "exec"
+assert_contains "codex provider is ephemeral" "$codex_args" "--ephemeral"
+assert_contains "codex provider uses read-only sandbox" "$codex_args" "read-only"
+assert_contains "codex provider forwards model override" "$codex_args" "codex-test-model"
+assert_contains "codex provider sends recap prompt on stdin" "$codex_stdin" "Commit messages:"
+
+mkdir -p "$codex_test_dir/home"
+printf '%s\n' 'GIT_RECAP_MODEL="stale-config-model"' > "$codex_test_dir/home/.git-recaprc"
+out=$(CODEX_ARGS_FILE="$codex_test_dir/default-args" CODEX_STDIN_FILE="$codex_test_dir/default-stdin" \
+    HOME="$codex_test_dir/home" PATH="$codex_test_dir/bin:$PATH" \
+    "$GIT_RECAP" --provider codex -m all -p all -u "Recap Tester" "$codex_test_dir/repo" 2>&1)
+codex_default_args=$(cat "$codex_test_dir/default-args")
+assert_not_contains "codex ignores configured model without --model" "$codex_default_args" "stale-config-model"
+
+out=$(CODEX_ARGS_FILE="$codex_test_dir/failure-args" CODEX_STDIN_FILE="$codex_test_dir/failure-stdin" \
+    CODEX_FORCE_FAILURE=true PATH="$codex_test_dir/bin:$PATH" \
+    "$GIT_RECAP" --provider codex -m bullets -p all -u "Recap Tester" "$codex_test_dir/repo" 2>&1)
+assert_not_contains "failed codex output is discarded" "$out" "PARTIAL CODEX OUTPUT"
+assert_contains "failed codex call falls back to commit messages" "$out" "codex recap input"
+
+rm -rf "$codex_test_dir"
 
 echo ""
 

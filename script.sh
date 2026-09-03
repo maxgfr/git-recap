@@ -38,6 +38,8 @@ USER_NAME=""
 REPO_FULL=""
 REPO_NAME=""
 REPO_MODE=""  # local or remote
+LOCAL_REPO_DIR=""
+REPO_WEB_URL=""
 BRANCH=""
 SINCE=""
 UNTIL=""
@@ -229,6 +231,15 @@ _voice_instruction() {
     esac
 }
 
+_markdown_commit_ref() {
+    local hash="$1"
+    if [[ -n "$REPO_WEB_URL" ]]; then
+        printf '[%s](%s/commit/%s)' "$hash" "$REPO_WEB_URL" "$hash"
+    else
+        printf '%s' "$hash"
+    fi
+}
+
 # ==============================================================================
 # Help
 # ==============================================================================
@@ -254,9 +265,10 @@ Usage:
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
   -b, --branch <branch>   Branch (default: auto-detected)
-  --provider <provider>   AI provider: claude, claude-api, openai, mistral, gemini
+  --provider <provider>   AI provider: claude, codex, claude-api, openai, mistral, gemini
                           (default: claude)
-  --model <model>         AI model override (defaults: haiku for claude,
+  --model <model>         AI model override (Codex uses its configured model;
+                          other defaults: haiku for claude,
                           claude-haiku-4-5-20251001 for claude-api, gpt-4o-mini
                           for openai, mistral-small-latest, gemini-2.0-flash)
   --lang <lang>           Language for AI output: en, fr, es, de, ... (default: en)
@@ -307,6 +319,7 @@ Usage:
 
   ## AI providers (--provider, --model)
   git-recap --provider claude maxgfr/subtool           # Claude CLI (default)
+  git-recap --provider codex maxgfr/subtool            # Codex CLI
   git-recap --provider claude-api maxgfr/subtool       # Anthropic API
   git-recap --provider openai maxgfr/subtool           # OpenAI
   git-recap --provider openai --model gpt-4o maxgfr/subtool  # Custom model
@@ -383,8 +396,8 @@ validate_args() {
     esac
 
     case "$provider" in
-        claude|claude-api|openai|mistral|gemini) ;;
-        *) die "Invalid provider: $provider (expected: claude, claude-api, openai, mistral, gemini)" ;;
+        claude|codex|claude-api|openai|mistral|gemini) ;;
+        *) die "Invalid provider: $provider (expected: claude, codex, claude-api, openai, mistral, gemini)" ;;
     esac
 
     local voice="${ARG_VOICE:-$DEFAULT_VOICE}"
@@ -436,6 +449,16 @@ detect_github_user() {
     fi
 }
 
+detect_local_repo_user() {
+    [[ -d "$ARG_REPO" ]] || return 1
+    git -C "$ARG_REPO" rev-parse --is-inside-work-tree &>/dev/null || return 1
+
+    local user
+    user=$(git -C "$ARG_REPO" config user.name 2>/dev/null || true)
+    [[ -z "$user" ]] && user=$(git -C "$ARG_REPO" log -1 --format='%an' 2>/dev/null || true)
+    [[ -n "$user" ]] && printf '%s\n' "$user"
+}
+
 config_init() {
     info "Initializing git-recap configuration..."
 
@@ -454,7 +477,7 @@ config_init() {
     fi
 
     local provider=""
-    printf "AI provider (claude/claude-api/openai/mistral/gemini) [claude]: " >&2
+    printf "AI provider (claude/codex/claude-api/openai/mistral/gemini) [claude]: " >&2
     read -r provider
     [[ -z "$provider" ]] && provider="claude"
 
@@ -611,18 +634,25 @@ resolve_repo() {
     local repo="$ARG_REPO"
 
     # Local path
-    if [[ "$repo" == "." || "$repo" == "./" || -d "$repo/.git" ]]; then
+    if [[ -d "$repo" ]] && git -C "$repo" rev-parse --is-inside-work-tree &>/dev/null; then
         REPO_MODE="local"
         local dir
-        if [[ "$repo" == "." || "$repo" == "./" ]]; then
-            dir="$(pwd)"
-        else
-            dir="$(cd "$repo" && pwd)"
-        fi
+        dir=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die "Could not resolve Git repository root: $repo"
+        LOCAL_REPO_DIR="$dir"
+        REPO_NAME="$(basename "$dir")"
         local remote_url
-        remote_url=$(git -C "$dir" remote get-url origin 2>/dev/null) || die "No remote 'origin' found in $dir"
-        REPO_FULL=$(echo "$remote_url" | sed -E 's#^(https://github\.com/|git@github\.com:)##; s/\.git$//')
-        REPO_NAME="${REPO_FULL##*/}"
+        remote_url=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
+        case "$remote_url" in
+            https://github.com/*|git@github.com:*)
+                REPO_FULL=$(echo "$remote_url" | sed -E 's#^(https://github\.com/|git@github\.com:)##; s/\.git$//; s#/$##')
+                REPO_NAME="${REPO_FULL##*/}"
+                REPO_WEB_URL="https://github.com/${REPO_FULL}"
+                ;;
+            *)
+                REPO_FULL="$REPO_NAME"
+                REPO_WEB_URL=""
+                ;;
+        esac
         info "Local repo: $REPO_FULL"
         return
     fi
@@ -633,6 +663,7 @@ resolve_repo() {
     if [[ "$repo" == https://github.com/* ]]; then
         REPO_FULL=$(echo "$repo" | sed -E 's#^https://github\.com/##; s/\.git$//; s#/$##')
         REPO_NAME="${REPO_FULL##*/}"
+        REPO_WEB_URL="https://github.com/${REPO_FULL}"
         info "Repo: $REPO_FULL"
         return
     fi
@@ -641,6 +672,7 @@ resolve_repo() {
     if [[ "$repo" == git@github.com:* ]]; then
         REPO_FULL=$(echo "$repo" | sed -E 's#^git@github\.com:##; s/\.git$//')
         REPO_NAME="${REPO_FULL##*/}"
+        REPO_WEB_URL="https://github.com/${REPO_FULL}"
         info "Repo: $REPO_FULL"
         return
     fi
@@ -649,6 +681,7 @@ resolve_repo() {
     if [[ "$repo" == */* ]]; then
         REPO_FULL="$repo"
         REPO_NAME="${REPO_FULL##*/}"
+        REPO_WEB_URL="https://github.com/${REPO_FULL}"
         info "Repo: $REPO_FULL"
         return
     fi
@@ -656,6 +689,7 @@ resolve_repo() {
     # repo name only — prefix with username
     REPO_FULL="${USER_NAME}/${repo}"
     REPO_NAME="$repo"
+    REPO_WEB_URL="https://github.com/${REPO_FULL}"
     info "Repo: $REPO_FULL (using user: $USER_NAME)"
 }
 
@@ -673,7 +707,9 @@ detect_default_branch() {
     fi
 
     if [[ "$REPO_MODE" == "local" ]]; then
-        BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's#refs/remotes/origin/##' || echo "main")
+        BRANCH=$(git -C "$LOCAL_REPO_DIR" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's#refs/remotes/origin/##' || true)
+        [[ -z "$BRANCH" ]] && BRANCH=$(git -C "$LOCAL_REPO_DIR" branch --show-current 2>/dev/null || true)
+        [[ -z "$BRANCH" ]] && BRANCH="HEAD"
     else
         BRANCH=$(gh api "repos/${REPO_FULL}" --jq '.default_branch' 2>/dev/null || echo "main")
     fi
@@ -714,6 +750,9 @@ check_dependencies() {
             case "$PROVIDER" in
                 claude)
                     command -v claude &>/dev/null || warn "claude CLI not found — AI will be skipped"
+                    ;;
+                codex)
+                    command -v codex &>/dev/null || warn "codex CLI not found — AI will be skipped"
                     ;;
                 claude-api)
                     [[ -n "${ANTHROPIC_API_KEY:-}" ]] || warn "ANTHROPIC_API_KEY not set — AI will be skipped"
@@ -807,8 +846,7 @@ fetch_commits() {
 
     if [[ "$REPO_MODE" == "local" ]]; then
         info "Fetching commits (local)..."
-        local dir="$ARG_REPO"
-        [[ "$dir" == "." || "$dir" == "./" ]] && dir="$(pwd)"
+        local dir="$LOCAL_REPO_DIR"
         local git_args=()
         if [[ "$ARG_ALL_BRANCHES" == true ]]; then
             git_args+=(--all)
@@ -887,8 +925,7 @@ fetch_team_commits() {
 
     if [[ "$REPO_MODE" == "local" ]]; then
         info "Fetching all commits (local, team mode)..."
-        local dir="$ARG_REPO"
-        [[ "$dir" == "." || "$dir" == "./" ]] && dir="$(pwd)"
+        local dir="$LOCAL_REPO_DIR"
         local git_args=()
         if [[ "$ARG_ALL_BRANCHES" == true ]]; then
             git_args+=(--all)
@@ -1032,6 +1069,21 @@ call_ai() {
             [[ -z "$model" ]] && model="haiku"
             spinner_start "$spinner_msg"
             result=$(unset CLAUDECODE; printf '%s' "$prompt" | claude -p --model "$model" 2>/dev/null) || true
+            spinner_stop
+            ;;
+        codex)
+            if ! command -v codex &>/dev/null; then
+                warn "codex CLI not found — skipping AI"
+                return 1
+            fi
+            local codex_args=(exec --ephemeral --skip-git-repo-check -s read-only)
+            [[ -n "$model" ]] && codex_args+=(-m "$model")
+            spinner_start "$spinner_msg"
+            if ! result=$(printf '%s' "$prompt" | codex "${codex_args[@]}" - 2>/dev/null); then
+                spinner_stop
+                warn "codex CLI failed — skipping AI"
+                return 1
+            fi
             spinner_stop
             ;;
         openai)
@@ -1384,7 +1436,9 @@ format_markdown() {
             echo "| Date | Hash | Message |"
             echo "|------|------|---------|"
             echo "$commits" | while IFS=$'\t' read -r hash msg date; do
-                echo "| ${date} | [${hash}](https://github.com/${REPO_FULL}/commit/${hash}) | ${msg} |"
+                local commit_ref
+                commit_ref=$(_markdown_commit_ref "$hash")
+                echo "| ${date} | ${commit_ref} | ${msg} |"
             done
             echo ""
         fi
@@ -1429,7 +1483,7 @@ format_text() {
             echo "--- Changes ---"
             echo ""
             echo "$bullets" | while IFS= read -r line; do
-                [[ -n "$line" ]] && printf '  \u2022 %s\n' "$line"
+                [[ -n "$line" ]] && printf '  • %s\n' "$line"
             done
             echo ""
         fi
@@ -1656,7 +1710,7 @@ output_team_text() {
             if [[ -n "$ac_bullets" ]]; then
                 echo "  Changes:"
                 echo "$ac_bullets" | while IFS= read -r line; do
-                    [[ -n "$line" ]] && printf '    \u2022 %s\n' "$line"
+                    [[ -n "$line" ]] && printf '    • %s\n' "$line"
                 done
                 echo ""
             fi
@@ -1818,7 +1872,9 @@ output_team_markdown() {
                 echo "| Date | Hash | Message |"
                 echo "|------|------|---------|"
                 echo "$ac" | while IFS=$'\t' read -r hash msg date; do
-                    echo "| ${date} | [${hash}](https://github.com/${REPO_FULL}/commit/${hash}) | ${msg} |"
+                    local commit_ref
+                    commit_ref=$(_markdown_commit_ref "$hash")
+                    echo "| ${date} | ${commit_ref} | ${msg} |"
                 done
                 echo ""
             fi
@@ -2027,7 +2083,8 @@ main() {
         elif [[ -n "${GIT_RECAP_USER:-}" ]]; then
             USER_NAME="$GIT_RECAP_USER"
         else
-            USER_NAME=$(detect_github_user)
+            USER_NAME=$(detect_local_repo_user || true)
+            [[ -z "$USER_NAME" ]] && USER_NAME=$(detect_github_user)
             [[ -n "$USER_NAME" ]] || die "Could not detect GitHub user. Use -u or run --init"
         fi
         info "User: $USER_NAME"
@@ -2042,10 +2099,11 @@ main() {
         PROVIDER="$DEFAULT_PROVIDER"
     fi
 
-    # Resolve model: CLI flag > config > empty (provider default)
+    # Codex owns its default model selection; only an explicit CLI flag may
+    # override it. Other providers retain the saved-model fallback.
     if [[ -n "$ARG_MODEL" ]]; then
         MODEL="$ARG_MODEL"
-    elif [[ -n "${GIT_RECAP_MODEL:-}" ]]; then
+    elif [[ "$PROVIDER" != "codex" && -n "${GIT_RECAP_MODEL:-}" ]]; then
         MODEL="$GIT_RECAP_MODEL"
     else
         MODEL=""

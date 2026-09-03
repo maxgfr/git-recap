@@ -2,7 +2,7 @@
 
 Commit recap generator — AI-powered summaries, bullet points, and commit lists.
 
-Supports multiple AI providers: **Claude** (CLI & API), **OpenAI**, **Mistral**, **Gemini**.
+Supports multiple AI providers: **Claude** (CLI & API), **Codex CLI**, **OpenAI**, **Mistral**, **Gemini**.
 
 ## Installation
 
@@ -22,9 +22,10 @@ chmod +x /usr/local/bin/git-recap
 ## Requirements
 
 - `git`
-- `gh` (GitHub CLI, authenticated)
+- `gh` (GitHub CLI, authenticated, for remote GitHub repositories)
 - One of the AI providers (optional):
   - `claude` CLI for Claude (default)
+  - `codex` CLI for Codex
   - `ANTHROPIC_API_KEY` env var for Claude API (without CLI)
   - `OPENAI_API_KEY` env var for OpenAI/ChatGPT
   - `MISTRAL_API_KEY` env var for Mistral
@@ -48,7 +49,7 @@ Options:
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
   -b, --branch <branch>   Branch (default: auto-detected)
-  --provider <provider>   AI provider: claude, claude-api, openai, mistral, gemini (default: claude)
+  --provider <provider>   AI provider: claude, codex, claude-api, openai, mistral, gemini (default: claude)
   --model <model>         AI model override (see defaults below)
   --lang <lang>           Language for AI output: en, fr, es, de, ... (default: en)
   --voice <voice>         Narrative voice: I, we, neutral, or nominal (default: neutral)
@@ -82,6 +83,7 @@ Options:
 | Provider | Flag | Default Model | Requires |
 |----------|------|---------------|----------|
 | Claude (CLI) | `--provider claude` | `haiku` | `claude` CLI |
+| Codex (CLI) | `--provider codex` | Codex configuration | `codex` CLI |
 | Claude (API) | `--provider claude-api` | `claude-haiku-4-5-20251001` | `ANTHROPIC_API_KEY` |
 | OpenAI | `--provider openai` | `gpt-4o-mini` | `OPENAI_API_KEY` |
 | Mistral | `--provider mistral` | `mistral-small-latest` | `MISTRAL_API_KEY` |
@@ -91,6 +93,8 @@ Override the model with `--model`:
 
 ```bash
 git-recap --provider claude --model sonnet maxgfr/subtool
+git-recap --provider codex maxgfr/subtool
+git-recap --provider codex --model <model-id> maxgfr/subtool
 git-recap --provider claude-api --model claude-sonnet-4-6 maxgfr/subtool
 git-recap --provider openai --model gpt-4o maxgfr/subtool
 git-recap --provider gemini --model gemini-1.5-pro maxgfr/subtool
@@ -156,6 +160,9 @@ git-recap -p 2026-01 -m commits maxgfr/subtool
 # Use Claude API (without CLI)
 git-recap --provider claude-api maxgfr/subtool
 
+# Use the authenticated Codex CLI (no API key required)
+git-recap --provider codex maxgfr/subtool
+
 # Use Mistral AI
 git-recap --provider mistral maxgfr/subtool
 
@@ -211,7 +218,7 @@ git recap maxgfr/subtool
 
 ### Markdown
 
-Stats table, AI summary, bullet list, and commit table with clickable hashes linking to GitHub.
+Stats table, AI summary, bullet list, and commit table. Hashes link to GitHub when the repository has a GitHub remote.
 
 ### JSON
 
