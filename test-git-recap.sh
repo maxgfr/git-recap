@@ -633,6 +633,37 @@ err=$(HOME="$reg_home" "$GIT_RECAP" -p 2026-13 -u x "$reg_repo" 2>&1 || true)
 assert_contains "invalid month is reported" "$err" "Invalid period: 2026-13"
 assert_not_contains "invalid period fails before the repo is resolved" "$err" "Local repo"
 
+# Tabs and empty subjects do not shift columns (local)
+_reg_init "$reg_dir/odd"
+_reg_commit "$reg_dir/odd" 2025-01-12 "Recap Tester" $'fix:\tindent with\ttabs'
+_reg_commit "$reg_dir/odd" 2025-01-13 "dependabot[bot]" ""
+_reg_commit "$reg_dir/odd" 2025-01-14 "Recap Tester" ""
+out=$(HOME="$reg_home" "$GIT_RECAP" --team -f json -p all "$reg_dir/odd" 2>/dev/null)
+assert_eq "tab in a subject does not invent a contributor" "Recap Tester" "$(echo "$out" | jq -r '[.contributors[].user] | join(",")')"
+assert_eq "tab in a subject becomes a space" "fix: indent with tabs" "$(echo "$out" | jq -r '.contributors[0].commits[1].message')"
+assert_eq "tab in a subject keeps the date column" "2025-01-12" "$(echo "$out" | jq -r '.contributors[0].commits[1].date')"
+assert_eq "empty subject gets a placeholder" "(no commit message)|2025-01-14" "$(echo "$out" | jq -r '.contributors[0].commits[0] | "\(.message)|\(.date)"')"
+assert_eq "empty subject does not shield a bot from the filter" "2" "$(echo "$out" | jq '.global_stats.total_commits')"
+assert_eq "stats ignore tabs in subjects" "2025-01-12|2025-01-14" "$(echo "$out" | jq -r '.global_stats | "\(.first_date)|\(.last_date)"')"
+out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m commits -u "Recap Tester" "$reg_dir/odd" 2>/dev/null)
+assert_contains "text lists the tabbed subject under its date" "$out" "  fix: indent with tabs"
+
+# Backslashes, tabs and CRLF in remote subjects, authors and bodies
+cat > "$mock_dir/commits-odd.json" <<'FIXTURE'
+[
+  {"sha": "fffffff6666", "parents": [{"sha": "p0"}], "author": null,
+   "commit": {"message": "fix: handle C:\\temp\\new\tpath\r\n\r\nBody line\r\nwith a \\n literal", "author": {"name": "CORP\\jsmith", "date": "2025-03-06T10:00:00Z"}}},
+  {"sha": "9999999aaaa", "parents": [{"sha": "p0"}], "author": {"login": "recaptester"},
+   "commit": {"message": "", "author": {"name": "Recap Tester", "date": "2025-03-05T10:00:00Z"}}}
+]
+FIXTURE
+out=$(PATH="$mock_dir/bin:$PATH" HOME="$reg_home" "$GIT_RECAP" -b odd -f json -p all -u recaptester mock/repo 2>/dev/null)
+assert_eq "remote subject keeps single backslashes" 'fix: handle C:\temp\new path' "$(echo "$out" | jq -r '.commits[0].message')"
+assert_eq "remote body is decoded once" $'Body line\nwith a \\n literal' "$(echo "$out" | jq -r '.commits[0].body')"
+assert_eq "remote empty message gets a placeholder" "(no commit message)" "$(echo "$out" | jq -r '.commits[1].message')"
+out=$(PATH="$mock_dir/bin:$PATH" HOME="$reg_home" "$GIT_RECAP" --team -b odd -f json -p all mock/repo 2>/dev/null)
+assert_eq "remote author keeps single backslashes" 'CORP\jsmith' "$(echo "$out" | jq -r '.contributors[] | select(.user | startswith("CORP")) | .user')"
+
 # A path that is not a repository is an error, not a GitHub lookup
 mkdir -p "$reg_dir/plain"
 err=$(cd "$reg_dir/plain" && PATH="$mock_dir/bin:$PATH" HOME="$reg_home" "$GIT_RECAP" -p all -u recaptester . 2>&1)

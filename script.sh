@@ -116,17 +116,44 @@ raw_bullets() {
     printf '%s\n' "$1" | cut -f2
 }
 
-# --- Commit details (body, changed files) for JSON output ---
+# --- Commit rows and details (body, changed files) ---
+# Rows are TSV. Fetchers guarantee that no field contains a tab and that no
+# field is empty (placeholders below), so rows always split cleanly.
 
-# jq program turning a GitHub API commit list into TSV, merges excluded.
-# Fields: hash, subject, date[, author], body (body is @tsv-escaped)
-_gh_commit_jq() {
-    local fields='.sha[0:7], (.commit.message | split("\n")[0]), (.commit.author.date | split("T")[0])'
-    [[ "${1:-}" == "team" ]] && fields+=', (.author.login // .commit.author.name)'
-    printf '.[] | select((.parents | length) < 2) | [%s, (.commit.message | split("\\n")[1:] | join("\\n"))] | @tsv' "$fields"
+NO_SUBJECT="(no commit message)"
+NO_AUTHOR="(unknown)"
+
+# _tsv_rows : stdin = rows of \x1f-separated fields (git log) → TSV rows
+_tsv_rows() {
+    LC_ALL=C awk -F'\037' -v OFS='\t' -v no_subject="$NO_SUBJECT" -v no_author="$NO_AUTHOR" '{
+        for (i = 1; i <= NF; i++) gsub(/\t/, " ", $i)
+        if ($2 == "") $2 = no_subject
+        if (NF >= 4 && $4 == "") $4 = no_author
+        $1 = $1
+        print
+    }'
 }
 
-# _split_details <n> : stdin = TSV whose field n+1 is the escaped body.
+# jq program turning a GitHub API commit list into TSV rows, merges excluded.
+# Fields: hash, subject, date[, author], body (the body is JSON-encoded)
+# shellcheck disable=SC2016  # the $names below are jq variables
+_gh_commit_jq() {
+    local author=""
+    [[ "${1:-}" == "team" ]] && author=', ((.author.login // .commit.author.name // "") | field($no_author))'
+    printf '%s' '
+        def field($placeholder):
+            gsub("[\\t\\r\\n]+"; " ") | sub("^ +"; "") | sub(" +$"; "")
+            | if . == "" then $placeholder else . end;
+        "'"$NO_SUBJECT"'" as $no_subject | "'"$NO_AUTHOR"'" as $no_author
+        | .[] | select((.parents | length) < 2)
+        | [ .sha[0:7],
+            (.commit.message | split("\n")[0] // "" | field($no_subject)),
+            (.commit.author.date | split("T")[0])'"$author"',
+            (.commit.message | split("\n")[1:] | join("\n") | @json) ]
+        | join("\t")'
+}
+
+# _split_details <n> : stdin = TSV whose field n+1 is the JSON-encoded body.
 # Records bodies in DETAILS_FILE and prints the first n fields.
 _split_details() {
     local n="$1" raw
@@ -134,14 +161,12 @@ _split_details() {
     [[ -z "$raw" ]] && return 0
     if [[ -n "$DETAILS_FILE" ]]; then
         printf '%s\n' "$raw" | jq -R -c --argjson n "$n" '
-            split("\t") | {
+            select(length > 0) | split("\t") | {
                 hash: .[0],
-                body: ((.[$n] // "")
-                    | gsub("\\\\(?<c>[tnr\\\\])"; if .c == "t" then "\t" elif .c == "n" then "\n" elif .c == "r" then "" else "\\" end)
-                    | sub("^\\s+"; "") | sub("\\s+$"; ""))
-            }' >> "$DETAILS_FILE" 2>/dev/null || true
+                body: ((.[$n] // "\"\"") | fromjson | gsub("\r"; "") | sub("^\\s+"; "") | sub("\\s+$"; ""))
+            }' >> "$DETAILS_FILE" || die "Could not read commit bodies from the GitHub API response"
     fi
-    printf '%s\n' "$raw" | cut -f1-"$n"
+    printf '%s\n' "$raw" | LC_ALL=C cut -f1-"$n"
 }
 
 # _collect_local_details <git log args...> : records body + numstat per commit
@@ -737,16 +762,16 @@ _fetch_local() {
         _local_ref_exists "$BRANCH" || return 0
         git_args+=("$BRANCH")
     fi
-    local row_format='%h%x09%s%x09%as%x09%aN'
+    local row_format='%h%x1f%s%x1f%as%x1f%aN'
     if [[ "$mode" != "team" ]]; then
-        row_format='%h%x09%s%x09%as'
+        row_format='%h%x1f%s%x1f%as'
         git_args+=(--author="$USER_NAME")
     fi
     git_args+=(--no-merges)
     [[ -n "$SINCE" ]] && git_args+=(--since="$SINCE")
     [[ -n "$UNTIL" ]] && git_args+=(--until="$UNTIL")
     # The trailing "--" keeps a branch named like a path from being ambiguous
-    git -C "$LOCAL_REPO_DIR" log "${git_args[@]}" --format="$row_format" -- \
+    git -C "$LOCAL_REPO_DIR" log "${git_args[@]}" --format="$row_format" -- | _tsv_rows \
         || die "git log failed in $LOCAL_REPO_DIR"
     _collect_local_details "${git_args[@]}"
 }
