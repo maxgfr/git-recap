@@ -40,6 +40,7 @@ BRANCH=""
 SINCE=""
 UNTIL=""
 PERIOD_LABEL=""
+WORK_DIR=""      # Scratch directory, removed on exit
 DETAILS_FILE=""  # JSON lines {hash, body, files?, additions?, deletions?} (json format only)
 
 # ==============================================================================
@@ -55,8 +56,8 @@ error() { _color "31"; printf "!! %s\n" "$*" >&2; _reset; }
 die()   { error "$@"; exit 1; }
 
 cleanup() {
-    if [[ -n "$DETAILS_FILE" ]]; then
-        rm -f "$DETAILS_FILE"
+    if [[ -n "$WORK_DIR" ]]; then
+        rm -rf "$WORK_DIR"
     fi
 }
 trap cleanup EXIT
@@ -656,8 +657,10 @@ detect_default_branch() {
             BRANCH=$(git -C "$LOCAL_REPO_DIR" branch --show-current 2>/dev/null || true)
         fi
         [[ -z "$BRANCH" ]] && BRANCH="HEAD"
+    elif command -v gh &>/dev/null; then
+        BRANCH=$(_github_get "repos/${REPO_FULL}" '.default_branch') || exit 1
     else
-        BRANCH=$(gh api "repos/${REPO_FULL}" --jq '.default_branch' 2>/dev/null || echo "main")
+        BRANCH="main"
     fi
 
     info "Branch: $BRANCH"
@@ -734,52 +737,55 @@ _fetch_local() {
     _collect_local_details "${git_args[@]}"
 }
 
-# Fetch commits from all branches via gh api, deduplicate by hash
-_fetch_gh_all_branches() {
-    local mode="$1" fields="$2"
-    local branches
-    branches=$(gh api "repos/${REPO_FULL}/branches" --paginate --jq '.[].name' 2>/dev/null) || true
-    [[ -z "$branches" ]] && return
-
-    local all_commits="" seen_hashes="" branch_name branch_commits line hash
-    while IFS= read -r branch_name; do
-        [[ -z "$branch_name" ]] && continue
-        branch_commits=$(gh api "repos/${REPO_FULL}/commits?$(_commits_query "$branch_name" "$mode")" --paginate \
-            --jq "$(_gh_commit_jq "$mode")" 2>/dev/null | _split_details "$fields" || true)
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            hash="${line%%	*}"
-            if [[ ":${seen_hashes}:" != *":${hash}:"* ]]; then
-                seen_hashes="${seen_hashes}:${hash}"
-                if [[ -n "$all_commits" ]]; then
-                    all_commits="${all_commits}"$'\n'"${line}"
-                else
-                    all_commits="$line"
-                fi
+# _github_die <gh stderr> : exit with a readable message for a failed API call
+_github_die() {
+    local err="$1" status=""
+    [[ "$err" =~ \(HTTP\ ([0-9]{3})\) ]] && status="${BASH_REMATCH[1]}"
+    case "$status" in
+        401) die "GitHub rejected the credentials. Run: gh auth login" ;;
+        403|429) die "Access denied (rate limit or permissions): ${REPO_FULL}" ;;
+        404)
+            if [[ -n "$ARG_BRANCH" ]]; then
+                die "Repository or branch not found: ${REPO_FULL} (branch: ${ARG_BRANCH})"
             fi
-        done <<< "$branch_commits"
-    done <<< "$branches"
-    echo "$all_commits"
+            die "Repository not found: ${REPO_FULL}" ;;
+        *) die "GitHub API error: ${err:-unknown error}" ;;
+    esac
+}
+
+# _github_get <path?query> <jq filter> → filtered output of a paginated GitHub
+# API GET. Any failure aborts: a partial result is never returned.
+_github_get() {
+    local path="$1" filter="$2" out err
+    if ! out=$(gh api "$path" --paginate --jq "$filter" 2>"$WORK_DIR/api.err" </dev/null); then
+        err=$(cat "$WORK_DIR/api.err")
+        # An empty repository has no commits to list
+        [[ "$err" == *"(HTTP 409)"* ]] && return 0
+        _github_die "$err"
+    fi
+    [[ -z "$out" ]] || printf '%s\n' "$out"
 }
 
 _fetch_gh() {
-    local mode="$1" fields="$2"
+    local mode="$1" fields="$2" filter raw
+    filter=$(_gh_commit_jq "$mode")
+
     if [[ "$ARG_ALL_BRANCHES" == true ]]; then
-        _fetch_gh_all_branches "$mode" "$fields"
-        return
+        local branches branch
+        branches=$(_github_get "repos/${REPO_FULL}/branches?per_page=100" '.[].name') || exit 1
+        raw=$(
+            while IFS= read -r branch; do
+                [[ -z "$branch" ]] && continue
+                _github_get "repos/${REPO_FULL}/commits?$(_commits_query "$branch" "$mode")" "$filter" || exit 1
+            done <<< "$branches"
+        ) || exit 1
+        # A commit reachable from several branches is listed once; newest day first
+        raw=$(printf '%s\n' "$raw" | awk -F'\t' '!seen[$1]++' | sort -s -t$'\t' -k3,3r)
+    else
+        raw=$(_github_get "repos/${REPO_FULL}/commits?$(_commits_query "$BRANCH" "$mode")" "$filter") || exit 1
     fi
 
-    local commits api_err=""
-    commits=$(gh api "repos/${REPO_FULL}/commits?$(_commits_query "$BRANCH" "$mode")" --paginate \
-        --jq "$(_gh_commit_jq "$mode")" 2>&1) || api_err="$commits"
-    if [[ -n "$api_err" ]]; then
-        case "$api_err" in
-            *"404"*) die "Repository not found: ${REPO_FULL}" ;;
-            *"403"*) die "Access denied (rate limit or permissions): ${REPO_FULL}" ;;
-            *) die "API error: ${api_err}" ;;
-        esac
-    fi
-    printf '%s\n' "$commits" | _split_details "$fields"
+    printf '%s\n' "$raw" | _split_details "$fields"
 }
 
 _fetch_curl() {
@@ -1582,12 +1588,15 @@ main() {
     # Check deps
     check_dependencies
 
+    WORK_DIR=$(mktemp -d)
+
     # Detect branch
     detect_default_branch
 
     # JSON output carries commit bodies (and changed files for local repos)
     if [[ "${ARG_FORMAT:-$DEFAULT_FORMAT}" == "json" ]]; then
-        DETAILS_FILE=$(mktemp)
+        DETAILS_FILE="$WORK_DIR/details.jsonl"
+        : > "$DETAILS_FILE"
     fi
 
     # === Team mode ===

@@ -90,7 +90,9 @@ assert_exit() {
 #   GH_MOCK_COMMITS         commits fixture (default: commits.json)
 #   GH_MOCK_BRANCHES        branches fixture (default: a single "main")
 #   GH_MOCK_DEFAULT_BRANCH  default branch name (default: main)
-#   GH_MOCK_FAIL            HTTP status to fail every api call with (e.g. 404)
+#   GH_MOCK_FAIL            HTTP status to fail api calls with (e.g. 404)
+#   GH_MOCK_FAIL_ON         only fail calls whose path contains this (default: all)
+#   GH_MOCK_STDERR          line printed on stderr by every api call
 #   GH_MOCK_AUTH_RC         exit code of `gh auth status` (default: 0)
 #   GH_MOCK_LOG             file receiving one line per gh invocation
 # A fixture named commits-<branch>.json next to the mock is served for sha=<branch>.
@@ -111,7 +113,8 @@ while [[ $# -gt 0 ]]; do
         *) shift ;;
     esac
 done
-if [[ -n "${GH_MOCK_FAIL:-}" ]]; then
+[[ -n "${GH_MOCK_STDERR:-}" ]] && printf '%s\n' "$GH_MOCK_STDERR" >&2
+if [[ -n "${GH_MOCK_FAIL:-}" && "$path" == *"${GH_MOCK_FAIL_ON:-}"* ]]; then
     printf '{"message":"Mock failure","status":"%s"}\n' "$GH_MOCK_FAIL"
     printf 'gh: Mock failure (HTTP %s)\n' "$GH_MOCK_FAIL" >&2
     exit 1
@@ -653,6 +656,57 @@ git -C "$reg_dir/stash" add .
 git -C "$reg_dir/stash" commit -q -m "feat: unicode path"
 out=$(HOME="$reg_home" "$GIT_RECAP" -f json -p all -u "Recap Tester" "$reg_dir/stash" 2>/dev/null)
 assert_eq "non-ASCII file names are not C-quoted" "数据.txt" "$(echo "$out" | jq -r '.commits[0].files[0].path')"
+
+# GitHub API failures are reported, in every mode, instead of "No commits found"
+_mock_run() { PATH="$mock_dir/bin:$PATH" HOME="$reg_home" "$GIT_RECAP" "$@"; }
+for api_mode in "" "--all-branches" "--team" "--team --all-branches"; do
+    # shellcheck disable=SC2086  # api_mode holds zero or more flags
+    err=$(GH_MOCK_FAIL=404 _mock_run $api_mode -p all -u recaptester mock/repo 2>&1 >/dev/null)
+    assert_eq "404 exits 1 (${api_mode:-single branch})" "1" "$?"
+    assert_contains "404 is reported (${api_mode:-single branch})" "$err" "Repository not found: mock/repo"
+    assert_not_contains "404 body does not leak into diagnostics (${api_mode:-single branch})" "$err" '{"message"'
+done
+err=$(GH_MOCK_FAIL=403 _mock_run -p all -u recaptester mock/repo 2>&1 >/dev/null)
+assert_contains "403 is reported as access denied" "$err" "Access denied"
+err=$(GH_MOCK_FAIL=500 _mock_run --all-branches -p all -u recaptester mock/repo 2>&1 >/dev/null)
+assert_eq "500 exits 1" "1" "$?"
+assert_contains "500 is reported" "$err" "GitHub API error"
+err=$(GH_MOCK_FAIL=404 GH_MOCK_FAIL_ON=commits _mock_run -b nope -p all -u recaptester mock/repo 2>&1 >/dev/null)
+assert_contains "404 with -b mentions the branch" "$err" "(branch: nope)"
+out=$(GH_MOCK_FAIL=409 GH_MOCK_FAIL_ON=commits _mock_run -p all -u recaptester mock/repo 2>/dev/null)
+assert_eq "empty remote repository exits 0" "0" "$?"
+assert_contains "empty remote repository reports no commits" "$out" "No commits found"
+
+# gh warnings on stderr are not parsed as commits
+out=$(GH_MOCK_STDERR="warning: something on stderr" _mock_run -f json -p all -u recaptester mock/repo 2>/dev/null)
+assert_eq "gh stderr does not become a commit" "aaaaaaa" "$(echo "$out" | jq -r '[.commits[].hash] | join(",")')"
+
+# Remote --all-branches: each commit once, newest day first across branches
+cat > "$mock_dir/branches.json" <<'FIXTURE'
+[{"name": "main"}, {"name": "dev"}]
+FIXTURE
+cat > "$mock_dir/commits-main.json" <<'FIXTURE'
+[
+  {"sha": "1111111aaaa", "parents": [{"sha": "p0"}], "author": {"login": "recaptester"},
+   "commit": {"message": "feat: newest on main", "author": {"name": "Recap Tester", "date": "2025-03-04T10:00:00Z"}}},
+  {"sha": "2222222bbbb", "parents": [{"sha": "p0"}], "author": {"login": "recaptester"},
+   "commit": {"message": "feat: shared base", "author": {"name": "Recap Tester", "date": "2025-03-02T10:00:00Z"}}}
+]
+FIXTURE
+cat > "$mock_dir/commits-dev.json" <<'FIXTURE'
+[
+  {"sha": "3333333cccc", "parents": [{"sha": "p0"}], "author": {"login": "recaptester"},
+   "commit": {"message": "feat: only on dev\n\nDev body", "author": {"name": "Recap Tester", "date": "2025-03-03T10:00:00Z"}}},
+  {"sha": "2222222bbbb", "parents": [{"sha": "p0"}], "author": {"login": "recaptester"},
+   "commit": {"message": "feat: shared base", "author": {"name": "Recap Tester", "date": "2025-03-02T10:00:00Z"}}}
+]
+FIXTURE
+out=$(GH_MOCK_BRANCHES="$mock_dir/branches.json" _mock_run --all-branches -f json -p all -u recaptester mock/repo 2>/dev/null)
+assert_eq "remote --all-branches dedupes and sorts by date" "1111111,3333333,2222222" "$(echo "$out" | jq -r '[.commits[].hash] | join(",")')"
+assert_eq "remote --all-branches keeps commit bodies" "Dev body" "$(echo "$out" | jq -r '.commits[1].body')"
+out=$(GH_MOCK_BRANCHES="$mock_dir/branches.json" _mock_run --all-branches -p all -m commits -u recaptester mock/repo 2>/dev/null)
+assert_eq "remote --all-branches prints each date once" "1" "$(echo "$out" | grep -c '^  2025-03-02$')"
+rm -f "$mock_dir/branches.json" "$mock_dir/commits-main.json" "$mock_dir/commits-dev.json"
 
 rm -rf "$reg_dir"
 
