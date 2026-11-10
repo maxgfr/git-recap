@@ -167,25 +167,60 @@ sed -e '/^set -euo pipefail$/d' -e '/^main "\$@"$/d' "$GIT_RECAP" > "$_GR_TMP"
 source "$_GR_TMP"
 rm -f "$_GR_TMP"
 
-# ---------- portable_date ----------
+# ---------- Dates and periods ----------
 
-echo "$(_bold "  portable_date")"
+echo "$(_bold "  dates")"
 
-out=$(portable_date first_of_month 0)
-assert_contains "first_of_month format has T00:00:00" "$out" "T00:00:00"
-assert_contains "first_of_month day is 01" "$out" "-01T"
+assert_eq "_jdn of 2000-01-01" "2451545" "$(_jdn 2000-01-01)"
+assert_eq "_from_jdn round trip (leap day)" "2024-02-29" "$(_from_jdn "$(_jdn 2024-02-29)")"
+assert_eq "_from_jdn crosses a year" "2026-01-01" "$(_from_jdn $(( $(_jdn 2025-12-31) + 1 )))"
+assert_eq "_month_shift back over a year" "2025-11" "$(_month_shift 2026-02 -3)"
+assert_eq "_month_shift forward over a year" "2027-01" "$(_month_shift 2026-12 1)"
+assert_eq "_month_label" "January 2026" "$(_month_label 2026-01)"
+assert_eq "_today is a valid date" "yes" "$(_is_valid_date "$(_today)" && echo yes || echo no)"
+assert_eq "_is_valid_date rejects Feb 30" "no" "$(_is_valid_date 2025-02-30 && echo yes || echo no)"
+assert_eq "_is_valid_date accepts a leap day" "yes" "$(_is_valid_date 2024-02-29 && echo yes || echo no)"
 
-out=$(portable_date first_of_next_month)
-assert_contains "first_of_next_month format has T00:00:00" "$out" "T00:00:00"
-assert_contains "first_of_next_month day is 01" "$out" "-01T"
+# _period <today> <period> → SINCE|UNTIL|LABEL as computed on that day
+_period() {
+    (
+        pinned_today="$1"
+        # shellcheck disable=SC2329  # called by compute_period
+        _today() { echo "$pinned_today"; }
+        # shellcheck disable=SC2034
+        ARG_SINCE="" ARG_UNTIL="" ARG_PERIOD="$2"
+        compute_period 2>/dev/null
+        echo "${SINCE}|${UNTIL}|${PERIOD_LABEL}"
+    )
+}
 
-out=$(portable_date month_label 0)
-current_year=$(date +%Y)
-assert_contains "month_label contains year" "$out" "$current_year"
+echo "$(_bold "  compute_period")"
 
-out=$(portable_date month_label_from "2026-01-15")
-assert_contains "month_label_from January" "$out" "January"
-assert_contains "month_label_from 2026" "$out" "2026"
+assert_eq "current-week on a Monday starts that day" \
+    "2026-11-09T00:00:00|2026-11-16T00:00:00|Current week" "$(_period 2026-11-09 current-week)"
+assert_eq "current-week on a Sunday" \
+    "2026-11-09T00:00:00|2026-11-16T00:00:00|Current week" "$(_period 2026-11-15 current-week)"
+assert_eq "current-week across a year boundary" \
+    "2025-12-29T00:00:00|2026-01-05T00:00:00|Current week" "$(_period 2026-01-01 current-week)"
+assert_eq "last-week on a Monday is the previous Mon-Sun" \
+    "2026-11-02T00:00:00|2026-11-09T00:00:00|Last week" "$(_period 2026-11-09 last-week)"
+assert_eq "last-week midweek" \
+    "2026-11-02T00:00:00|2026-11-09T00:00:00|Last week" "$(_period 2026-11-12 last-week)"
+assert_eq "current-month in December rolls into next year" \
+    "2026-12-01T00:00:00|2027-01-01T00:00:00|December 2026" "$(_period 2026-12-31 current-month)"
+assert_eq "last-month on the 31st names the right month" \
+    "2026-02-01T00:00:00|2026-03-01T00:00:00|February 2026" "$(_period 2026-03-31 last-month)"
+assert_eq "last-month in January is last December" \
+    "2025-12-01T00:00:00|2026-01-01T00:00:00|December 2025" "$(_period 2026-01-15 last-month)"
+assert_eq "<N> months on the 31st" \
+    "2026-02-01T00:00:00|2026-06-01T00:00:00|February 2026 - May 2026" "$(_period 2026-05-31 3)"
+assert_eq "<N> with a leading zero is decimal" \
+    "2026-03-01T00:00:00|2026-12-01T00:00:00|March 2026 - November 2026" "$(_period 2026-11-10 08)"
+assert_eq "current-year" "2026-01-01T00:00:00|2027-01-01T00:00:00|2026" "$(_period 2026-06-01 current-year)"
+assert_eq "last-year" "2025-01-01T00:00:00|2026-01-01T00:00:00|2025" "$(_period 2026-06-01 last-year)"
+assert_eq "YYYY-MM in December" "2025-12-01T00:00:00|2026-01-01T00:00:00|December 2025" "$(_period 2026-06-01 2025-12)"
+assert_eq "YYYY" "2025-01-01T00:00:00|2026-01-01T00:00:00|2025" "$(_period 2026-06-01 2025)"
+assert_eq "all" "||All time" "$(_period 2026-06-01 all)"
 
 echo ""
 
@@ -354,12 +389,12 @@ echo "$(_bold "Period computation")"
 
 # 16. current period
 out=$("$GIT_RECAP" -m commits -p current -u testuser maxgfr/subtool 2>&1 || true)
-current_month=$(portable_date month_label 0)
+current_month=$(LC_ALL=C date +"%B %Y")
 assert_contains "period current shows current month" "$out" "$current_month"
 
 # 17. last period
 out=$("$GIT_RECAP" -m commits -p last -u testuser maxgfr/subtool 2>&1 || true)
-last_month=$(portable_date month_label -1)
+last_month=$(_month_label "$(_month_shift "$(date +%Y-%m)" -1)")
 assert_contains "period last shows last month" "$out" "$last_month"
 
 # 18. YYYY-MM period
@@ -558,6 +593,16 @@ err=$(HOME="$reg_dir/badhome" "$GIT_RECAP" --team -p all "$reg_repo" 2>&1 || tru
 assert_contains "invalid config format is reported" "$err" "Invalid format: xml"
 out=$(HOME="$reg_dir/badhome" "$GIT_RECAP" --team -f text -p all "$reg_repo" 2>/dev/null)
 assert_contains "-f overrides an invalid config format" "$out" "Team Recap"
+
+# Periods and dates are range-checked, before anything else runs
+assert_exit "-p with month 13 exits 1" 1 env HOME="$reg_home" "$GIT_RECAP" -p 2026-13 -u x "$reg_repo"
+assert_exit "-p with month 00 exits 1" 1 env HOME="$reg_home" "$GIT_RECAP" -p 2026-00 -u x "$reg_repo"
+assert_exit "--since with month 13 exits 1" 1 env HOME="$reg_home" "$GIT_RECAP" --since 2025-13-01 -u x "$reg_repo"
+assert_exit "--until on Feb 30 exits 1" 1 env HOME="$reg_home" "$GIT_RECAP" --until 2025-02-30 -u x "$reg_repo"
+assert_exit "--since on a leap day exits 0" 0 env HOME="$reg_home" "$GIT_RECAP" --since 2024-02-29 -u x "$reg_repo"
+err=$(HOME="$reg_home" "$GIT_RECAP" -p 2026-13 -u x "$reg_repo" 2>&1 || true)
+assert_contains "invalid month is reported" "$err" "Invalid period: 2026-13"
+assert_not_contains "invalid period fails before the repo is resolved" "$err" "Local repo"
 
 rm -rf "$reg_dir"
 

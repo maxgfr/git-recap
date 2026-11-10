@@ -61,84 +61,50 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- Portable date ---
+# --- Dates ---
+# Calendar math is done in Bash arithmetic so that it behaves the same with
+# GNU and BSD date; the clock is only read in _today.
 
-_GNU_DATE=""
-_is_gnu_date() {
-    if [[ -z "$_GNU_DATE" ]]; then
-        if date --version >/dev/null 2>&1; then
-            _GNU_DATE=1
-        else
-            _GNU_DATE=0
-        fi
-    fi
-    [[ "$_GNU_DATE" -eq 1 ]]
+_MONTH_NAMES=(January February March April May June July August September October November December)
+
+# Today's date (YYYY-MM-DD)
+_today() { date +%Y-%m-%d; }
+
+# _jdn <YYYY-MM-DD> → Julian day number (jdn % 7 is 0 on Mondays)
+_jdn() {
+    local y=$((10#${1:0:4})) m=$((10#${1:5:2})) d=$((10#${1:8:2}))
+    local a=$(( (14 - m) / 12 ))
+    local yy=$(( y + 4800 - a )) mm=$(( m + 12 * a - 3 ))
+    echo $(( d + (153 * mm + 2) / 5 + 365 * yy + yy / 4 - yy / 100 + yy / 400 - 32045 ))
 }
 
-# portable_date <operation> [args...]
-#   first_of_month <offset>       - First day of month, offset months from now
-#   first_of_next_month           - First day of next month
-#   month_label <offset>          - Human month label, offset months from now
-#   month_label_from <YYYY-MM-DD> - Human month label from specific date
-portable_date() {
-    local op="$1"; shift
-    case "$op" in
-        first_of_month)
-            local offset="${1:-0}"
-            if _is_gnu_date; then
-                if [[ "$offset" -eq 0 ]]; then
-                    date -d "$(date +%Y-%m-01)" +%Y-%m-%dT00:00:00
-                elif [[ "$offset" -lt 0 ]]; then
-                    local abs=$(( -offset ))
-                    date -d "$(date +%Y-%m-01) -${abs} month" +%Y-%m-%dT00:00:00
-                else
-                    date -d "$(date +%Y-%m-01) +${offset} month" +%Y-%m-%dT00:00:00
-                fi
-            else
-                if [[ "$offset" -eq 0 ]]; then
-                    LC_ALL=C date -v1d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S
-                elif [[ "$offset" -lt 0 ]]; then
-                    LC_ALL=C date -v1d -v"${offset}"m -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S
-                else
-                    LC_ALL=C date -v1d -v+"${offset}"m -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S
-                fi
-            fi
-            ;;
-        first_of_next_month)
-            if _is_gnu_date; then
-                date -d "$(date +%Y-%m-01) +1 month" +%Y-%m-%dT00:00:00
-            else
-                LC_ALL=C date -v1d -v+1m -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S
-            fi
-            ;;
-        month_label)
-            local offset="${1:-0}"
-            if _is_gnu_date; then
-                if [[ "$offset" -eq 0 ]]; then
-                    LC_ALL=C date +"%B %Y"
-                elif [[ "$offset" -lt 0 ]]; then
-                    local abs=$(( -offset ))
-                    LC_ALL=C date -d "-${abs} month" +"%B %Y"
-                else
-                    LC_ALL=C date -d "+${offset} month" +"%B %Y"
-                fi
-            else
-                if [[ "$offset" -eq 0 ]]; then
-                    LC_ALL=C date +"%B %Y"
-                else
-                    LC_ALL=C date -v"${offset}"m +"%B %Y"
-                fi
-            fi
-            ;;
-        month_label_from)
-            local from_date="$1"
-            if _is_gnu_date; then
-                LC_ALL=C date -d "$from_date" +"%B %Y"
-            else
-                LC_ALL=C date -jf '%Y-%m-%d' "$from_date" +"%B %Y" 2>/dev/null || echo "${from_date:0:7}"
-            fi
-            ;;
-    esac
+# _from_jdn <jdn> → YYYY-MM-DD
+_from_jdn() {
+    local a=$(( $1 + 32044 ))
+    local b=$(( (4 * a + 3) / 146097 ))
+    local c=$(( a - 146097 * b / 4 ))
+    local d=$(( (4 * c + 3) / 1461 ))
+    local e=$(( c - 1461 * d / 4 ))
+    local m=$(( (5 * e + 2) / 153 ))
+    printf '%04d-%02d-%02d\n' \
+        $(( 100 * b + d - 4800 + m / 10 )) $(( m + 3 - 12 * (m / 10) )) $(( e - (153 * m + 2) / 5 + 1 ))
+}
+
+# _is_valid_date <YYYY-MM-DD> : true for a real calendar date
+_is_valid_date() {
+    [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+    [[ "$(_from_jdn "$(_jdn "$1")")" == "$1" ]]
+}
+
+# _month_shift <YYYY-MM> <offset> → YYYY-MM, offset months away
+_month_shift() {
+    local idx=$(( 10#${1:0:4} * 12 + 10#${1:5:2} - 1 + $2 ))
+    printf '%04d-%02d\n' $(( idx / 12 )) $(( idx % 12 + 1 ))
+}
+
+# _month_label <YYYY-MM> → "January 2026"
+_month_label() {
+    echo "${_MONTH_NAMES[$(( 10#${1:5:2} - 1 ))]} ${1:0:4}"
 }
 
 # raw_bullets <commits> → commit messages, one per line, for modes bullets/all
@@ -411,7 +377,7 @@ validate_args() {
 
     local d
     for d in "$ARG_SINCE" "$ARG_UNTIL"; do
-        [[ -z "$d" || "$d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "Invalid date: $d (expected: YYYY-MM-DD)"
+        [[ -z "$d" ]] || _is_valid_date "$d" || die "Invalid date: $d (expected: YYYY-MM-DD)"
     done
     if [[ -n "$ARG_SINCE" && -n "$ARG_UNTIL" && "$ARG_SINCE" > "$ARG_UNTIL" ]]; then
         die "--since ($ARG_SINCE) is after --until ($ARG_UNTIL)"
@@ -512,6 +478,9 @@ compute_period() {
     fi
 
     local period="${ARG_PERIOD:-$DEFAULT_PERIOD}"
+    local today this_month
+    today=$(_today)
+    this_month="${today:0:7}"
 
     case "$period" in
         all)
@@ -519,92 +488,55 @@ compute_period() {
             UNTIL=""
             PERIOD_LABEL="All time"
             ;;
-        current|current-month|"")
-            SINCE=$(portable_date first_of_month 0)
-            UNTIL=$(portable_date first_of_next_month)
-            PERIOD_LABEL=$(portable_date month_label 0)
+        current|current-month)
+            SINCE="${this_month}-01T00:00:00"
+            UNTIL="$(_month_shift "$this_month" 1)-01T00:00:00"
+            PERIOD_LABEL=$(_month_label "$this_month")
             ;;
         last|last-month)
-            SINCE=$(portable_date first_of_month -1)
-            UNTIL=$(portable_date first_of_month 0)
-            PERIOD_LABEL=$(portable_date month_label -1)
+            local last_month
+            last_month=$(_month_shift "$this_month" -1)
+            SINCE="${last_month}-01T00:00:00"
+            UNTIL="${this_month}-01T00:00:00"
+            PERIOD_LABEL=$(_month_label "$last_month")
             ;;
-        current-week)
-            if _is_gnu_date; then
-                SINCE=$(date -d "last monday" +%Y-%m-%dT00:00:00 2>/dev/null || date -d "monday" +%Y-%m-%dT00:00:00)
-                UNTIL=$(date -d "next monday" +%Y-%m-%dT00:00:00)
-            else
-                local dow
-                dow=$(date +%u)
-                local days_since_mon=$(( dow - 1 ))
-                SINCE=$(LC_ALL=C date -v-"${days_since_mon}"d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
-                local days_until_next_mon=$(( 7 - days_since_mon ))
-                UNTIL=$(LC_ALL=C date -v+"${days_until_next_mon}"d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
-            fi
+        current-week|last-week)
+            # Weeks run Monday to Sunday
+            local jdn monday
+            jdn=$(_jdn "$today")
+            monday=$(( jdn - jdn % 7 ))
             PERIOD_LABEL="Current week"
-            ;;
-        last-week)
-            if _is_gnu_date; then
-                UNTIL=$(date -d "last monday" +%Y-%m-%dT00:00:00 2>/dev/null || date -d "monday" +%Y-%m-%dT00:00:00)
-                SINCE=$(date -d "$UNTIL -7 days" +%Y-%m-%dT00:00:00)
-            else
-                local dow
-                dow=$(date +%u)
-                local days_since_mon=$(( dow - 1 ))
-                UNTIL=$(LC_ALL=C date -v-"${days_since_mon}"d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
-                SINCE=$(LC_ALL=C date -v-"${days_since_mon}"d -v-7d -v0H -v0M -v0S +%Y-%m-%dT%H:%M:%S)
+            if [[ "$period" == "last-week" ]]; then
+                monday=$(( monday - 7 ))
+                PERIOD_LABEL="Last week"
             fi
-            PERIOD_LABEL="Last week"
+            SINCE="$(_from_jdn "$monday")T00:00:00"
+            UNTIL="$(_from_jdn $(( monday + 7 )))T00:00:00"
             ;;
-        current-year)
-            if _is_gnu_date; then
-                SINCE=$(date -d "$(date +%Y)-01-01" +%Y-%m-%dT00:00:00)
-                UNTIL=$(date -d "$(($(date +%Y) + 1))-01-01" +%Y-%m-%dT00:00:00)
-            else
-                local year
-                year=$(date +%Y)
-                SINCE="${year}-01-01T00:00:00"
-                UNTIL="$((year + 1))-01-01T00:00:00"
-            fi
-            PERIOD_LABEL="$(date +%Y)"
-            ;;
-        last-year)
-            if _is_gnu_date; then
-                local last_y=$(( $(date +%Y) - 1 ))
-                SINCE=$(date -d "${last_y}-01-01" +%Y-%m-%dT00:00:00)
-                UNTIL=$(date -d "$(date +%Y)-01-01" +%Y-%m-%dT00:00:00)
-            else
-                local last_y=$(( $(date +%Y) - 1 ))
-                SINCE="${last_y}-01-01T00:00:00"
-                UNTIL="$(date +%Y)-01-01T00:00:00"
-            fi
-            PERIOD_LABEL="${last_y}"
+        current-year|last-year)
+            local year=$(( 10#${today:0:4} ))
+            [[ "$period" == "last-year" ]] && year=$(( year - 1 ))
+            SINCE="${year}-01-01T00:00:00"
+            UNTIL="$(( year + 1 ))-01-01T00:00:00"
+            PERIOD_LABEL="$year"
             ;;
         [0-9]|[0-9][0-9])
-            local n="$period"
-            SINCE=$(portable_date first_of_month "-${n}")
-            UNTIL=$(portable_date first_of_next_month)
-            local start_label end_label
-            start_label=$(portable_date month_label "-${n}")
-            end_label=$(portable_date month_label 0)
-            PERIOD_LABEL="${start_label} - ${end_label}"
+            local first_month
+            first_month=$(_month_shift "$this_month" "-$(( 10#$period ))")
+            SINCE="${first_month}-01T00:00:00"
+            UNTIL="$(_month_shift "$this_month" 1)-01T00:00:00"
+            PERIOD_LABEL="$(_month_label "$first_month") - $(_month_label "$this_month")"
             ;;
         [0-9][0-9][0-9][0-9]-[0-9][0-9])
-            local year="${period%%-*}"
-            local month="${period##*-}"
-            SINCE="${year}-${month}-01T00:00:00"
-            local next_month=$((10#$month + 1))
-            local next_year="$year"
-            if [[ $next_month -gt 12 ]]; then
-                next_month=1
-                next_year=$((year + 1))
-            fi
-            UNTIL=$(printf '%s-%02d-01T00:00:00' "$next_year" "$next_month")
-            PERIOD_LABEL=$(portable_date month_label_from "${year}-${month}-01")
+            local month=$(( 10#${period:5:2} ))
+            [[ $month -ge 1 && $month -le 12 ]] || die "Invalid period: $period (month must be 01-12)"
+            SINCE="${period}-01T00:00:00"
+            UNTIL="$(_month_shift "$period" 1)-01T00:00:00"
+            PERIOD_LABEL=$(_month_label "$period")
             ;;
         [0-9][0-9][0-9][0-9])
             SINCE="${period}-01-01T00:00:00"
-            UNTIL="$((period + 1))-01-01T00:00:00"
+            UNTIL="$(printf '%04d' $(( 10#$period + 1 )))-01-01T00:00:00"
             PERIOD_LABEL="$period"
             ;;
         *)
@@ -1669,6 +1601,9 @@ main() {
 
     validate_args
 
+    # Compute period (first: a bad period must fail before any network call)
+    compute_period
+
     # Resolve user: CLI flag > config > auto-detect
     if [[ "$ARG_TEAM" == true ]]; then
         # In team mode, user is optional (only needed for repo name resolution)
@@ -1701,9 +1636,6 @@ main() {
 
     # Detect branch
     detect_default_branch
-
-    # Compute period
-    compute_period
 
     # JSON output carries commit bodies (and changed files for local repos)
     if [[ "${ARG_FORMAT:-$DEFAULT_FORMAT}" == "json" ]]; then
