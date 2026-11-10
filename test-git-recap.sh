@@ -93,7 +93,8 @@ assert_exit() {
 #   GH_MOCK_FAIL            HTTP status to fail api calls with (e.g. 404)
 #   GH_MOCK_FAIL_ON         only fail calls whose path contains this (default: all)
 #   GH_MOCK_STDERR          line printed on stderr by every api call
-#   GH_MOCK_AUTH_RC         exit code of `gh auth status` (default: 0)
+#   GH_MOCK_AUTH_RC         exit code of `gh auth status` (default: 0); when not 0,
+#                           api calls fail like a logged-out gh
 #   GH_MOCK_LOG             file receiving one line per gh invocation
 # A fixture named commits-<branch>.json next to the mock is served for sha=<branch>.
 
@@ -105,6 +106,10 @@ dir="$(cd "$(dirname "$0")/.." && pwd)"
 [[ -n "${GH_MOCK_LOG:-}" ]] && printf '%s\n' "$1 ${2:-}" >> "$GH_MOCK_LOG"
 [[ "$1" == "auth" ]] && exit "${GH_MOCK_AUTH_RC:-0}"
 [[ "$1" == "api" ]] || exit 1
+if [[ "${GH_MOCK_AUTH_RC:-0}" -ne 0 ]]; then
+    printf '%s\n' "To get started with GitHub CLI, please run:  gh auth login" >&2
+    exit 4
+fi
 path="$2"; shift 2
 filter="."
 while [[ $# -gt 0 ]]; do
@@ -256,9 +261,12 @@ out=$(
 )
 assert_eq "SSH URL without .git resolves" "owner/repo|repo|remote" "$out"
 
-# _resolve <repo arg> [user] → REPO_FULL|REPO_NAME|REPO_WEB_URL, or "died"
+# _resolve <repo arg> [user] [gh login] → REPO_FULL|REPO_NAME|REPO_WEB_URL, or "died"
 _resolve() {
     (
+        gh_login="${3:-}"
+        # shellcheck disable=SC2329  # called by resolve_repo
+        detect_github_user() { [[ -z "$gh_login" ]] || echo "$gh_login"; }
         # shellcheck disable=SC2034
         ARG_REPO="$1" USER_NAME="${2:-}" REPO_MODE="" REPO_FULL="" REPO_NAME=""
         resolve_repo 2>/dev/null
@@ -270,6 +278,7 @@ assert_eq "URL with .git and trailing slash" "maxgfr/subtool|subtool|https://git
 assert_eq "repo name with dots" "maxgfr/my.repo-1|my.repo-1|https://github.com/maxgfr/my.repo-1" "$(_resolve "maxgfr/my.repo-1")"
 assert_eq "bare name uses the user" "me/thing|thing|https://github.com/me/thing" "$(_resolve "thing" "me")"
 assert_eq "bare name without a user is rejected" "died" "$(_resolve "thing")"
+assert_eq "bare name falls back to the gh login" "ghme/thing|thing|https://github.com/ghme/thing" "$(_resolve "thing" "" "ghme")"
 assert_eq "extra path segments are rejected" "died" "$(_resolve "owner/repo/extra")"
 assert_eq "characters GitHub does not allow are rejected" "died" "$(_resolve "owner/re po?x=1")"
 assert_eq "missing absolute path is not a GitHub repo" "died" "$(_resolve "/no/such/path")"
@@ -859,6 +868,24 @@ GH_MOCK_LOG="$reg_dir/gh.log" _mock_run -b "feature/#123" -p 2025-03 -u "Jane Do
 assert_contains "branch is percent-encoded in the query" "$(cat "$reg_dir/gh.log")" "sha=feature/%23123&"
 assert_contains "author is percent-encoded in the query" "$(cat "$reg_dir/gh.log")" "author=Jane%20Doe&"
 assert_contains "the rest of the query survives" "$(cat "$reg_dir/gh.log")" "since=2025-03-01T00:00:00Z"
+
+# gh is only called when its answer is needed
+rm -f "$reg_dir/gh.log"
+GH_MOCK_LOG="$reg_dir/gh.log" _mock_run --team -p all "$reg_repo" >/dev/null 2>&1
+assert_eq "team recap of a local repo never calls gh" "no" "$([[ -s "$reg_dir/gh.log" ]] && echo yes || echo no)"
+rm -f "$reg_dir/gh.log"
+GH_MOCK_LOG="$reg_dir/gh.log" _mock_run --team -p all mock/repo >/dev/null 2>&1
+assert_eq "team recap of owner/repo: default branch and commits only" "api repos/mock/repo|api repos/mock/repo/commits" \
+    "$(sed 's/?.*//' "$reg_dir/gh.log" | tr '\n' '|' | sed 's/|$//')"
+rm -f "$reg_dir/gh.log"
+GH_MOCK_LOG="$reg_dir/gh.log" _mock_run -p all mock/repo >/dev/null 2>&1
+assert_eq "user detection is a single call, without an auth check" "api user|api repos/mock/repo|api repos/mock/repo/commits" \
+    "$(sed 's/?.*//' "$reg_dir/gh.log" | tr '\n' '|' | sed 's/|$//')"
+out=$(_mock_run --team -p all barename 2>&1)
+assert_contains "team recap of a bare repo name looks the user up" "$out" "Repo: recaptester/barename (using user: recaptester)"
+err=$(GH_MOCK_AUTH_RC=1 _mock_run -p all -u recaptester mock/repo 2>&1 >/dev/null)
+assert_eq "logged-out gh exits 1" "1" "$?"
+assert_contains "logged-out gh is reported as such" "$err" "gh is not authenticated. Run: gh auth login"
 
 # gh warnings on stderr are not parsed as commits
 out=$(GH_MOCK_STDERR="warning: something on stderr" _mock_run -f json -p all -u recaptester mock/repo 2>/dev/null)

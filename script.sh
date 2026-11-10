@@ -520,11 +520,10 @@ config_load() {
     fi
 }
 
+# Prints the login of the authenticated gh user, or nothing (the call fails by
+# itself without credentials: no separate auth check needed)
 detect_github_user() {
     if command -v gh &>/dev/null; then
-        if ! gh auth status &>/dev/null; then
-            return
-        fi
         gh api user --jq '.login' 2>/dev/null || true
     fi
 }
@@ -704,6 +703,7 @@ resolve_repo() {
         */*) ;;
         *)
             # repo name only — prefix with username
+            [[ -n "$USER_NAME" ]] || USER_NAME=$(detect_github_user)
             [[ -n "$USER_NAME" ]] || die "Cannot resolve \"$repo\" without a GitHub user. Use owner/repo or -u"
             repo="${USER_NAME}/${repo}"
             via=" (using user: $USER_NAME)"
@@ -765,14 +765,6 @@ detect_default_branch() {
 # Dependencies
 # ==============================================================================
 
-check_gh_auth() {
-    if command -v gh &>/dev/null; then
-        if ! gh auth status &>/dev/null; then
-            die "gh is not authenticated. Run: gh auth login"
-        fi
-    fi
-}
-
 check_dependencies() {
     command -v git &>/dev/null || die "git is required but not found"
 
@@ -786,7 +778,6 @@ check_dependencies() {
             command -v curl &>/dev/null || die "gh or curl is required for remote repos"
             command -v jq &>/dev/null || die "jq is required when using curl fallback"
         fi
-        check_gh_auth
     fi
 }
 
@@ -864,8 +855,13 @@ _github_die() {
                 die "Repository or branch not found: ${REPO_FULL} (branch: ${ARG_BRANCH})"
             fi
             die "Repository not found: ${REPO_FULL}" ;;
-        *) die "GitHub API error: ${err:-unknown error}" ;;
     esac
+    # No HTTP status: the request never reached the API. Only now is it worth
+    # asking gh whether it is logged in (the check costs a network round trip).
+    if [[ -z "$status" ]] && command -v gh &>/dev/null && ! gh auth status &>/dev/null; then
+        die "gh is not authenticated. Run: gh auth login"
+    fi
+    die "GitHub API error: ${err:-unknown error}"
 }
 
 # _github_get <path?query> <jq filter> → filtered output of a paginated GitHub
@@ -1556,13 +1552,12 @@ main() {
 
     # Resolve user: CLI flag > config > auto-detect
     if [[ "$ARG_TEAM" == true ]]; then
-        # In team mode, user is optional (only needed for repo name resolution)
+        # In team mode the user only serves to complete a bare repo name:
+        # resolve_repo looks it up on GitHub if it turns out to be needed
         if [[ -n "$ARG_USER" ]]; then
             USER_NAME="$ARG_USER"
         elif [[ -n "${GIT_RECAP_USER:-}" ]]; then
             USER_NAME="$GIT_RECAP_USER"
-        else
-            USER_NAME=$(detect_github_user) || true
         fi
         info "Team mode: all contributors"
     else
