@@ -313,6 +313,16 @@ filter_noise() {
     fi
 }
 
+# _print_bullets <bullets> <prefix> : one prefixed line per bullet
+# (printf, not echo: a subject may be "-n" or "-e")
+_print_bullets() {
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && printf '%s%s\n' "$2" "$line"
+    done <<< "$1"
+    return 0
+}
+
 _markdown_commit_ref() {
     local hash="$1"
     if [[ -n "$REPO_WEB_URL" ]]; then
@@ -1076,9 +1086,7 @@ format_markdown() {
         if [[ -n "$bullets" ]]; then
             echo "## Changes"
             echo ""
-            echo "$bullets" | while IFS= read -r line; do
-                [[ -n "$line" ]] && echo "- ${line}"
-            done
+            _print_bullets "$bullets" "- "
             echo ""
         fi
     fi
@@ -1136,9 +1144,7 @@ format_text() {
         if [[ -n "$bullets" ]]; then
             echo "--- Changes ---"
             echo ""
-            echo "$bullets" | while IFS= read -r line; do
-                [[ -n "$line" ]] && printf '  • %s\n' "$line"
-            done
+            _print_bullets "$bullets" "  • "
             echo ""
         fi
     fi
@@ -1301,9 +1307,7 @@ output_team_text() {
         if [[ "$mode" == "bullets" || "$mode" == "all" ]]; then
             if [[ -n "$ac_bullets" ]]; then
                 echo "  Changes:"
-                echo "$ac_bullets" | while IFS= read -r line; do
-                    [[ -n "$line" ]] && printf '    • %s\n' "$line"
-                done
+                _print_bullets "$ac_bullets" "    • "
                 echo ""
             fi
         fi
@@ -1421,9 +1425,7 @@ output_team_markdown() {
             if [[ -n "$ac_bullets" ]]; then
                 echo "### Changes"
                 echo ""
-                echo "$ac_bullets" | while IFS= read -r line; do
-                    [[ -n "$line" ]] && echo "- ${line}"
-                done
+                _print_bullets "$ac_bullets" "- "
                 echo ""
             fi
         fi

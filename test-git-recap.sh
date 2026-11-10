@@ -658,6 +658,16 @@ assert_eq "stats ignore tabs in subjects" "2025-01-12|2025-01-14" "$(echo "$out"
 out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m commits -u "Recap Tester" "$reg_dir/odd" 2>/dev/null)
 assert_contains "text lists the tabbed subject under its date" "$out" "  fix: indent with tabs"
 
+# A subject that looks like an echo option is still printed
+_reg_init "$reg_dir/dash"
+_reg_commit "$reg_dir/dash" 2025-01-12 "Recap Tester" "-n"
+out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m bullets -u "Recap Tester" "$reg_dir/dash" 2>/dev/null)
+assert_contains "text bullet for a subject named -n" "$out" "  • -n"
+out=$(HOME="$reg_home" "$GIT_RECAP" -f markdown -p all -m bullets -u "Recap Tester" "$reg_dir/dash" 2>/dev/null)
+assert_contains "markdown bullet for a subject named -n" "$out" "- -n"
+out=$(HOME="$reg_home" "$GIT_RECAP" --team -p all -m bullets "$reg_dir/dash" 2>/dev/null)
+assert_contains "team bullet for a subject named -n" "$out" "    • -n"
+
 # --exclude-author takes a literal name as well as a glob, in any case
 out=$(HOME="$reg_home" "$GIT_RECAP" --team --all-commits -f json -p all "$reg_dir/odd" 2>/dev/null)
 assert_eq "--all-commits keeps the bot" "Recap Tester,dependabot[bot]" "$(echo "$out" | jq -r '[.contributors[].user] | sort | join(",")')"
