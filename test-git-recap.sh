@@ -98,55 +98,6 @@ sed -e '/^set -euo pipefail$/d' -e '/^main "\$@"$/d' "$GIT_RECAP" > "$_GR_TMP"
 source "$_GR_TMP"
 rm -f "$_GR_TMP"
 
-# ---------- _strip_bullet_markers ----------
-
-echo "$(_bold "  _strip_bullet_markers")"
-
-out=$(echo "- item one" | _strip_bullet_markers)
-assert_eq "strips - prefix" "item one" "$out"
-
-out=$(echo "* item two" | _strip_bullet_markers)
-assert_eq "strips * prefix" "item two" "$out"
-
-out=$(echo "+ item three" | _strip_bullet_markers)
-assert_eq "strips + prefix" "item three" "$out"
-
-out=$(echo "1. item four" | _strip_bullet_markers)
-assert_eq "strips 1. prefix" "item four" "$out"
-
-out=$(echo "2) item five" | _strip_bullet_markers)
-assert_eq "strips 2) prefix" "item five" "$out"
-
-out=$(echo "  - indented item" | _strip_bullet_markers)
-assert_eq "strips indented - prefix" "indented item" "$out"
-
-out=$(echo "plain text" | _strip_bullet_markers)
-assert_eq "preserves plain text" "plain text" "$out"
-
-out=$(printf '%s\n%s\n%s\n' "- first" "" "- second" | _strip_bullet_markers)
-expected=$'first\nsecond'
-assert_eq "removes empty lines between items" "$expected" "$out"
-
-echo ""
-
-# ---------- _truncate_messages ----------
-
-echo "$(_bold "  _truncate_messages")"
-
-input=$(printf '%s\n' {1..5})
-out=$(echo "$input" | _truncate_messages 3 2>/dev/null)
-count=$(echo "$out" | wc -l | tr -d ' ')
-assert_eq "truncates to max" "3" "$count"
-
-out=$(echo "$input" | _truncate_messages 10 2>/dev/null)
-count=$(echo "$out" | wc -l | tr -d ' ')
-assert_eq "no truncation when under max" "5" "$count"
-
-out=$(echo "single line" | _truncate_messages 5 2>/dev/null)
-assert_eq "single line passes through" "single line" "$out"
-
-echo ""
-
 # ---------- portable_date ----------
 
 echo "$(_bold "  portable_date")"
@@ -228,15 +179,10 @@ out=$("$GIT_RECAP" --help 2>/dev/null)
 assert_exit "--help exits 0" 0 "$GIT_RECAP" --help
 assert_contains "--help shows usage" "$out" "Usage:"
 assert_contains "--help shows options" "$out" "# Options"
-assert_contains "--help shows --no-ai" "$out" "--no-ai"
-assert_contains "--help shows --model" "$out" "--model"
+assert_not_contains "--help no longer documents --provider" "$out" "--provider"
+assert_contains "--help points to the agent skill" "$out" "npx skills add maxgfr/git-recap"
 assert_contains "--help shows json format" "$out" "json"
 assert_contains "--help shows SSH example" "$out" "git@github.com"
-assert_contains "--help shows all providers" "$out" "claude, codex, claude-api, openai, mistral, gemini"
-assert_contains "--help shows env vars" "$out" "OPENAI_API_KEY"
-assert_contains "--help shows anthropic env" "$out" "ANTHROPIC_API_KEY"
-assert_contains "--help shows mistral env" "$out" "MISTRAL_API_KEY"
-assert_contains "--help shows gemini env" "$out" "GEMINI_API_KEY"
 
 # 2. --version
 out=$("$GIT_RECAP" --version 2>/dev/null)
@@ -258,24 +204,15 @@ assert_exit "invalid format exits 1" 1 "$GIT_RECAP" -f xml somerepo
 err=$("$GIT_RECAP" -f xml somerepo 2>&1 || true)
 assert_contains "invalid format shows error" "$err" "Invalid format"
 
-# 6. Invalid provider
-assert_exit "invalid provider exits 1" 1 "$GIT_RECAP" --provider anthropic somerepo
-err=$("$GIT_RECAP" --provider anthropic somerepo 2>&1 || true)
-assert_contains "invalid provider shows error" "$err" "Invalid provider"
+# 6. Removed AI flags point to the agent skill
+for removed_flag in --provider --model --lang --voice; do
+    assert_exit "$removed_flag exits 1" 1 "$GIT_RECAP" "$removed_flag" value somerepo
+    err=$("$GIT_RECAP" "$removed_flag" value somerepo 2>&1 || true)
+    assert_contains "$removed_flag error mentions the agent skill" "$err" "agent skill"
+done
 
-# 7. Valid providers accepted
-assert_exit "provider claude accepted" 0 "$GIT_RECAP" --provider claude --help
-assert_exit "provider codex accepted" 0 "$GIT_RECAP" --provider codex --help
-assert_exit "provider claude-api accepted" 0 "$GIT_RECAP" --provider claude-api --help
-assert_exit "provider openai accepted" 0 "$GIT_RECAP" --provider openai --help
-assert_exit "provider mistral accepted" 0 "$GIT_RECAP" --provider mistral --help
-assert_exit "provider gemini accepted" 0 "$GIT_RECAP" --provider gemini --help
-
-# 8. --no-ai flag accepted
+# 7. --no-ai stays accepted for compatibility
 assert_exit "--no-ai with --help exits 0" 0 "$GIT_RECAP" --no-ai --help
-
-# 9. --model flag accepted
-assert_exit "--model with --help exits 0" 0 "$GIT_RECAP" --model sonnet --help
 
 echo ""
 
@@ -386,60 +323,68 @@ fi
 
 echo ""
 
-# ---------- Codex CLI provider ----------
+# ---------- No built-in AI ----------
 
-echo "$(_bold "Codex CLI provider")"
+echo "$(_bold "No built-in AI")"
 
-codex_test_dir=$(mktemp -d /tmp/git-recap-codex.XXXXXX)
-mkdir -p "$codex_test_dir/bin" "$codex_test_dir/repo"
-git -C "$codex_test_dir/repo" init -q -b main
-git -C "$codex_test_dir/repo" config user.name "Recap Tester"
-git -C "$codex_test_dir/repo" config user.email "recap@example.invalid"
-git -C "$codex_test_dir/repo" commit -q --allow-empty -m "feat: codex recap input"
+noai_dir=$(mktemp -d /tmp/git-recap-noai.XXXXXX)
+mkdir -p "$noai_dir/bin" "$noai_dir/repo" "$noai_dir/home"
+git -C "$noai_dir/repo" init -q -b main
+git -C "$noai_dir/repo" config user.name "Recap Tester"
+git -C "$noai_dir/repo" config user.email "recap@example.invalid"
+git -C "$noai_dir/repo" commit -q --allow-empty -m "feat: first raw message"
+git -C "$noai_dir/repo" commit -q --allow-empty -m "fix: second raw message"
 
-cat > "$codex_test_dir/bin/codex" <<'MOCK_CODEX'
-#!/usr/bin/env bash
-printf '%s\n' "$@" > "$CODEX_ARGS_FILE"
-cat > "$CODEX_STDIN_FILE"
-if [[ "${CODEX_FORCE_FAILURE:-false}" == "true" ]]; then
-    printf '%s\n' "PARTIAL CODEX OUTPUT"
-    exit 7
-fi
-printf '%s\n' "Codex generated summary." "---SPLIT---" "Codex generated bullet."
-MOCK_CODEX
-chmod +x "$codex_test_dir/bin/codex"
+# Fake AI CLIs record any invocation
+for ai_cli in claude codex; do
+    printf '#!/usr/bin/env bash\ntouch "%s/%s-called"\necho "AI OUTPUT"\n' "$noai_dir" "$ai_cli" > "$noai_dir/bin/$ai_cli"
+    chmod +x "$noai_dir/bin/$ai_cli"
+done
+printf '%s\n' 'GIT_RECAP_PROVIDER="claude"' 'GIT_RECAP_MODEL="sonnet"' 'GIT_RECAP_LANG="fr"' 'GIT_RECAP_VOICE="we"' > "$noai_dir/home/.git-recaprc"
 
-out=$(CODEX_ARGS_FILE="$codex_test_dir/args" CODEX_STDIN_FILE="$codex_test_dir/stdin" \
-    PATH="$codex_test_dir/bin:$PATH" \
-    "$GIT_RECAP" --provider codex --model codex-test-model -m all -p all \
-    -u "Recap Tester" "$codex_test_dir/repo" 2>&1)
-codex_args=$(cat "$codex_test_dir/args")
-codex_stdin=$(cat "$codex_test_dir/stdin")
-assert_contains "codex provider returns generated summary" "$out" "Codex generated summary."
-assert_contains "codex provider returns generated bullets" "$out" "Codex generated bullet."
-assert_contains "text output renders a bullet character" "$out" "• Codex generated bullet."
+out=$(HOME="$noai_dir/home" PATH="$noai_dir/bin:$PATH" \
+    "$GIT_RECAP" -m all -p all -u "Recap Tester" "$noai_dir/repo" 2>&1)
+assert_eq "claude CLI is never called" "no" "$([[ -e "$noai_dir/claude-called" ]] && echo yes || echo no)"
+assert_eq "codex CLI is never called" "no" "$([[ -e "$noai_dir/codex-called" ]] && echo yes || echo no)"
+assert_not_contains "no AI output in recap" "$out" "AI OUTPUT"
+assert_not_contains "no Summary section without the skill" "$out" "--- Summary ---"
+assert_contains "raw commit messages are used as bullets" "$out" "• fix: second raw message"
 assert_not_contains "text output does not print a Unicode escape literally" "$out" '\u2022'
-assert_contains "codex provider uses exec" "$codex_args" "exec"
-assert_contains "codex provider is ephemeral" "$codex_args" "--ephemeral"
-assert_contains "codex provider uses read-only sandbox" "$codex_args" "read-only"
-assert_contains "codex provider forwards model override" "$codex_args" "codex-test-model"
-assert_contains "codex provider sends recap prompt on stdin" "$codex_stdin" "Commit messages:"
+assert_not_contains "legacy AI config keys are ignored silently" "$out" "Ignoring unrecognized config line"
 
-mkdir -p "$codex_test_dir/home"
-printf '%s\n' 'GIT_RECAP_MODEL="stale-config-model"' > "$codex_test_dir/home/.git-recaprc"
-out=$(CODEX_ARGS_FILE="$codex_test_dir/default-args" CODEX_STDIN_FILE="$codex_test_dir/default-stdin" \
-    HOME="$codex_test_dir/home" PATH="$codex_test_dir/bin:$PATH" \
-    "$GIT_RECAP" --provider codex -m all -p all -u "Recap Tester" "$codex_test_dir/repo" 2>&1)
-codex_default_args=$(cat "$codex_test_dir/default-args")
-assert_not_contains "codex ignores configured model without --model" "$codex_default_args" "stale-config-model"
+out=$("$GIT_RECAP" -f json -m all -p all -u "Recap Tester" "$noai_dir/repo" 2>/dev/null)
+assert_eq "json bullets are raw commit messages" "fix: second raw message|feat: first raw message" "$(echo "$out" | jq -r '.bullets | join("|")')"
+assert_eq "json has no summary field" "false" "$(echo "$out" | jq 'has("summary")')"
 
-out=$(CODEX_ARGS_FILE="$codex_test_dir/failure-args" CODEX_STDIN_FILE="$codex_test_dir/failure-stdin" \
-    CODEX_FORCE_FAILURE=true PATH="$codex_test_dir/bin:$PATH" \
-    "$GIT_RECAP" --provider codex -m bullets -p all -u "Recap Tester" "$codex_test_dir/repo" 2>&1)
-assert_not_contains "failed codex output is discarded" "$out" "PARTIAL CODEX OUTPUT"
-assert_contains "failed codex call falls back to commit messages" "$out" "codex recap input"
+out=$("$GIT_RECAP" --team -f json -m all -p all "$noai_dir/repo" 2>/dev/null)
+assert_eq "team json has no team_summary field" "false" "$(echo "$out" | jq 'has("team_summary")')"
+assert_eq "team json contributors have no summary field" "false" "$(echo "$out" | jq '.contributors[0] | has("summary")')"
 
-rm -rf "$codex_test_dir"
+out_noai=$("$GIT_RECAP" --no-ai -m all -p all -u "Recap Tester" "$noai_dir/repo" 2>/dev/null)
+out_default=$("$GIT_RECAP" -m all -p all -u "Recap Tester" "$noai_dir/repo" 2>/dev/null)
+assert_eq "--no-ai is a no-op" "$out_default" "$out_noai"
+
+rm -rf "$noai_dir"
+
+echo ""
+
+# ---------- Agent skill ----------
+
+echo "$(_bold "Agent skill")"
+
+SKILL_DIR="${SCRIPT_DIR}/skills/git-recap"
+TOTAL=$((TOTAL + 1))
+if cmp -s "$GIT_RECAP" "$SKILL_DIR/scripts/git-recap.sh"; then
+    PASS=$((PASS + 1))
+    printf '  %s %s\n' "$(_green "PASS")" "bundled skill script matches script.sh"
+else
+    FAIL=$((FAIL + 1))
+    printf '  %s %s\n' "$(_red "FAIL")" "bundled skill script matches script.sh (run: cp script.sh skills/git-recap/scripts/git-recap.sh)"
+fi
+skill_md=$(cat "$SKILL_DIR/SKILL.md")
+assert_eq "SKILL.md starts with frontmatter" "---" "$(head -1 "$SKILL_DIR/SKILL.md")"
+assert_contains "SKILL.md declares its name" "$skill_md" "name: git-recap"
+assert_contains "SKILL.md declares a description" "$skill_md" "description: "
 
 echo ""
 

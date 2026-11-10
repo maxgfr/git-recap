@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ==============================================================================
-# git-recap — Monthly commit recap CLI
+# git-recap — Commit recap data generator (AI writing lives in the agent skill)
 # ==============================================================================
 
 VERSION="1.7.0"
@@ -12,9 +12,6 @@ CONFIG_FILE="$HOME/.git-recaprc"
 DEFAULT_PERIOD="current-month"
 DEFAULT_MODE="all"
 DEFAULT_FORMAT="text"
-DEFAULT_PROVIDER="claude"
-DEFAULT_LANG="en"
-DEFAULT_VOICE="neutral"
 
 # State
 ARG_USER=""
@@ -23,15 +20,10 @@ ARG_MODE=""
 ARG_FORMAT=""
 ARG_OUTPUT=""
 ARG_BRANCH=""
-ARG_PROVIDER=""
-ARG_MODEL=""
-ARG_LANG=""
-ARG_VOICE=""
 ARG_REPO=""
 ARG_INIT=false
 ARG_TEAM=false
 ARG_ALL_BRANCHES=false
-NO_AI=false
 
 # Resolved values
 USER_NAME=""
@@ -44,13 +36,6 @@ BRANCH=""
 SINCE=""
 UNTIL=""
 PERIOD_LABEL=""
-PROVIDER=""
-MODEL=""
-LANG_CODE=""
-VOICE_MODE=""
-SPINNER_PID=""
-AI_SUMMARY=""
-AI_BULLETS=""
 
 # ==============================================================================
 # Helpers
@@ -63,36 +48,6 @@ info()  { _color "34"; printf ":: %s\n" "$*" >&2; _reset; }
 warn()  { _color "33"; printf "!! %s\n" "$*" >&2; _reset; }
 error() { _color "31"; printf "!! %s\n" "$*" >&2; _reset; }
 die()   { error "$@"; exit 1; }
-
-spinner_start() {
-    local msg="$1"
-    if [[ -t 2 ]]; then
-        (
-            local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-            local i=0
-            while true; do
-                printf '\r\033[34m%s %s\033[0m' "${chars:i%${#chars}:1}" "$msg" >&2
-                i=$((i + 1))
-                sleep 0.1
-            done
-        ) &
-        SPINNER_PID=$!
-    fi
-}
-
-spinner_stop() {
-    if [[ -n "${SPINNER_PID:-}" ]]; then
-        kill "$SPINNER_PID" 2>/dev/null || true
-        wait "$SPINNER_PID" 2>/dev/null || true
-        printf '\r\033[K' >&2
-        SPINNER_PID=""
-    fi
-}
-
-cleanup() {
-    spinner_stop
-}
-trap cleanup EXIT INT TERM HUP
 
 # --- Portable date ---
 
@@ -174,61 +129,12 @@ portable_date() {
     esac
 }
 
-# --- AI helpers ---
-
-_strip_bullet_markers() {
-    sed -E 's/^[[:space:]]*([-*+]|[0-9]+[.)]) //' | grep -v '^[[:space:]]*$' || true
-}
-
-_truncate_messages() {
-    local max="${1:-200}"
-    local lines
-    lines=$(cat)
-    local count
-    count=$(echo "$lines" | wc -l | tr -d ' ')
-    if [[ $count -gt $max ]]; then
-        warn "Truncating to $max commit messages for AI"
-        echo "$lines" | head -"$max"
-    else
-        echo "$lines"
-    fi
-}
-
-_json_escape() {
-    if command -v jq &>/dev/null; then
-        jq -Rs .
-    elif command -v python3 &>/dev/null; then
-        python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
-    else
-        die "jq or python3 required for AI API calls"
-    fi
-}
-
-_lang_name() {
-    case "${1:-en}" in
-        en) echo "English" ;;
-        fr) echo "French" ;;
-        es) echo "Spanish" ;;
-        de) echo "German" ;;
-        it) echo "Italian" ;;
-        pt) echo "Portuguese" ;;
-        ja) echo "Japanese" ;;
-        zh) echo "Chinese" ;;
-        ko) echo "Korean" ;;
-        ar) echo "Arabic" ;;
-        ru) echo "Russian" ;;
-        nl) echo "Dutch" ;;
-        *) echo "$1" ;;
-    esac
-}
-
-_voice_instruction() {
-    case "${1:-I}" in
-        I|i|je)   echo "Write from a first-person singular perspective, using 'I'. Present the work as your own accomplishments." ;;
-        we|We|nous) echo "Write from a first-person plural perspective, using 'we'. Present the work as team accomplishments." ;;
-        neutral) echo "Use a noun-based impersonal style. Each item should start with an action noun (e.g., 'Implementation of the home page', 'Optimization of build times', 'Setup of CI/CD pipeline'). Never use first-person pronouns (I, we). Keep it professional and concise." ;;
-        nominal) echo "Use a French-style noun-based impersonal style (style nominal). Each item should start with an action noun (e.g., 'Mise en place de la page d'accueil', 'Optimisation des temps de build', 'Intégration des retours designer', 'Déploiement de la nouvelle version'). Never use first-person pronouns (je, nous, j'ai). Keep it professional, concise and suitable for a project status report." ;;
-    esac
+# raw_bullets <commits> → commit messages, one per line, for modes bullets/all
+raw_bullets() {
+    local mode="${ARG_MODE:-$DEFAULT_MODE}"
+    [[ "$mode" != "bullets" && "$mode" != "all" ]] && return
+    [[ -z "$1" ]] && return
+    printf '%s\n' "$1" | cut -f2
 }
 
 _markdown_commit_ref() {
@@ -262,33 +168,23 @@ Usage:
                           current-month, last-month, current-week, last-week,
                           current-year, last-year, all, <N>, YYYY-MM, YYYY
   -m, --mode <mode>       Mode: summary, commits, bullets, all (default: all)
+                          (bullets are raw commit messages; summaries are
+                          written by the git-recap agent skill)
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
   -b, --branch <branch>   Branch (default: auto-detected)
-  --provider <provider>   AI provider: claude, codex, claude-api, openai, mistral, gemini
-                          (default: claude)
-  --model <model>         AI model override (Codex uses its configured model;
-                          other defaults: haiku for claude,
-                          claude-haiku-4-5-20251001 for claude-api, gpt-4o-mini
-                          for openai, mistral-small-latest, gemini-2.0-flash)
-  --lang <lang>           Language for AI output: en, fr, es, de, ... (default: en)
-  --voice <voice>         Narrative voice: I, we, neutral, or nominal (default: neutral)
-                          neutral: noun-based English ("Implementation of...")
-                          nominal: noun-based French ("Mise en place de...")
   --team                  Team mode: recap for all contributors grouped by author
-                          (defaults voice to neutral, includes global team summary)
   --all-branches          Fetch commits from all branches (not just default/specified)
-  --no-ai                 Skip AI generation (summary/bullets)
   --init                  Initialize configuration
   -h, --help              Show this help
   -v, --version           Show version
 
-# Environment Variables
+# Agent skill
 
-  ANTHROPIC_API_KEY       Required for --provider claude-api
-  OPENAI_API_KEY          Required for --provider openai
-  MISTRAL_API_KEY         Required for --provider mistral
-  GEMINI_API_KEY          Required for --provider gemini
+  git-recap never calls an AI model. Install the agent skill to have your
+  coding agent (Claude Code, Codex, ...) write summaries and bullet points:
+
+    npx skills add maxgfr/git-recap
 
 # Examples
 
@@ -313,31 +209,13 @@ Usage:
   git-recap -f json maxgfr/subtool | jq .              # JSON piped to jq
 
   ## Mode selection (-m)
-  git-recap -m summary maxgfr/subtool                  # AI summary only
+  git-recap -m summary maxgfr/subtool                  # Stats only
   git-recap -m commits maxgfr/subtool                  # Commit list only
   git-recap -m bullets maxgfr/subtool                  # Bullet points only
-
-  ## AI providers (--provider, --model)
-  git-recap --provider claude maxgfr/subtool           # Claude CLI (default)
-  git-recap --provider codex maxgfr/subtool            # Codex CLI
-  git-recap --provider claude-api maxgfr/subtool       # Anthropic API
-  git-recap --provider openai maxgfr/subtool           # OpenAI
-  git-recap --provider openai --model gpt-4o maxgfr/subtool  # Custom model
-  git-recap --provider mistral maxgfr/subtool          # Mistral
-  git-recap --provider gemini maxgfr/subtool           # Gemini
-  git-recap --no-ai maxgfr/subtool                     # No AI, raw data only
-
-  ## Language and voice (--lang, --voice)
-  git-recap --lang fr maxgfr/subtool                   # French output
-  git-recap --lang en --voice we maxgfr/subtool        # English, team voice ("we")
-  git-recap --lang fr --voice I maxgfr/subtool         # French, first person ("I")
-  git-recap --voice neutral maxgfr/subtool             # Noun-based English style
-  git-recap --voice nominal maxgfr/subtool             # Noun-based French style (style nominal)
 
   ## Team mode (--team)
   git-recap --team maxgfr/subtool                      # All contributors recap
   git-recap --team -p last-month maxgfr/subtool        # Team recap for last month
-  git-recap --team --lang fr maxgfr/subtool            # Team recap in French
   git-recap --team -f markdown -o recap.md maxgfr/subtool  # Team markdown report
   git-recap --team -b develop maxgfr/subtool           # Team recap on develop branch
   git-recap --team --all-branches .                    # All contributors, all branches
@@ -362,11 +240,9 @@ parse_args() {
             -f|--format)  ARG_FORMAT="${2:?Missing value for $1}"; shift 2 ;;
             -o|--output)  ARG_OUTPUT="${2:?Missing value for $1}"; shift 2 ;;
             -b|--branch)  ARG_BRANCH="${2:?Missing value for $1}"; shift 2 ;;
-            --provider)   ARG_PROVIDER="${2:?Missing value for $1}"; shift 2 ;;
-            --model)      ARG_MODEL="${2:?Missing value for $1}"; shift 2 ;;
-            --lang)       ARG_LANG="${2:?Missing value for $1}"; shift 2 ;;
-            --voice)      ARG_VOICE="${2:?Missing value for $1}"; shift 2 ;;
-            --no-ai)      NO_AI=true; shift ;;
+            --provider|--model|--lang|--voice)
+                die "$1 was removed in git-recap 2.0: AI writing now happens through the git-recap agent skill (npx skills add maxgfr/git-recap)" ;;
+            --no-ai)      shift ;;  # Kept for compatibility: git-recap never calls AI
             --team)       ARG_TEAM=true; shift ;;
             --all-branches) ARG_ALL_BRANCHES=true; shift ;;
             --init)       ARG_INIT=true; shift ;;
@@ -383,7 +259,6 @@ parse_args() {
 validate_args() {
     local mode="${ARG_MODE:-$DEFAULT_MODE}"
     local format="${ARG_FORMAT:-$DEFAULT_FORMAT}"
-    local provider="${ARG_PROVIDER:-$DEFAULT_PROVIDER}"
 
     case "$mode" in
         summary|commits|bullets|all) ;;
@@ -393,17 +268,6 @@ validate_args() {
     case "$format" in
         text|markdown|json) ;;
         *) die "Invalid format: $format (expected: text, markdown, json)" ;;
-    esac
-
-    case "$provider" in
-        claude|codex|claude-api|openai|mistral|gemini) ;;
-        *) die "Invalid provider: $provider (expected: claude, codex, claude-api, openai, mistral, gemini)" ;;
-    esac
-
-    local voice="${ARG_VOICE:-$DEFAULT_VOICE}"
-    case "$voice" in
-        I|i|je|we|We|nous|neutral|nominal) ;;
-        *) die "Invalid voice: $voice (expected: I, we, neutral, or nominal)" ;;
     esac
 
     if [[ "$ARG_INIT" == false && -z "$ARG_REPO" ]]; then
@@ -423,16 +287,10 @@ config_load() {
             [[ -z "$_line" || "$_line" =~ ^[[:space:]]*# ]] && continue
             if [[ "$_line" =~ ^GIT_RECAP_USER=\"([^\"]*)\"$ ]]; then
                 GIT_RECAP_USER="${BASH_REMATCH[1]}"
-            elif [[ "$_line" =~ ^GIT_RECAP_PROVIDER=\"([^\"]*)\"$ ]]; then
-                GIT_RECAP_PROVIDER="${BASH_REMATCH[1]}"
-            elif [[ "$_line" =~ ^GIT_RECAP_MODEL=\"([^\"]*)\"$ ]]; then
-                GIT_RECAP_MODEL="${BASH_REMATCH[1]}"
             elif [[ "$_line" =~ ^GIT_RECAP_FORMAT=\"([^\"]*)\"$ ]]; then
                 GIT_RECAP_FORMAT="${BASH_REMATCH[1]}"
-            elif [[ "$_line" =~ ^GIT_RECAP_LANG=\"([^\"]*)\"$ ]]; then
-                GIT_RECAP_LANG="${BASH_REMATCH[1]}"
-            elif [[ "$_line" =~ ^GIT_RECAP_VOICE=\"([^\"]*)\"$ ]]; then
-                GIT_RECAP_VOICE="${BASH_REMATCH[1]}"
+            elif [[ "$_line" =~ ^GIT_RECAP_(PROVIDER|MODEL|LANG|VOICE)=\"[^\"]*\"$ ]]; then
+                :  # Legacy 1.x AI settings: accepted and ignored
             else
                 warn "Ignoring unrecognized config line $_line_num in $CONFIG_FILE"
             fi
@@ -476,38 +334,15 @@ config_init() {
         [[ -z "$user" ]] && die "Username is required"
     fi
 
-    local provider=""
-    printf "AI provider (claude/codex/claude-api/openai/mistral/gemini) [claude]: " >&2
-    read -r provider
-    [[ -z "$provider" ]] && provider="claude"
-
-    local ai_model=""
-    printf "AI model (leave empty for provider default): " >&2
-    read -r ai_model
-
     local default_format=""
     printf "Default format (text/markdown/json) [text]: " >&2
     read -r default_format
     [[ -z "$default_format" ]] && default_format="text"
 
-    local lang=""
-    printf "AI output language (en/fr/es/de/...) [en]: " >&2
-    read -r lang
-    [[ -z "$lang" ]] && lang="en"
-
-    local voice=""
-    printf "Narrative voice (I/we/neutral/nominal) [neutral]: " >&2
-    read -r voice
-    [[ -z "$voice" ]] && voice="neutral"
-
     cat > "$CONFIG_FILE" <<EOF
 # git-recap configuration
 GIT_RECAP_USER="$user"
-GIT_RECAP_PROVIDER="$provider"
-GIT_RECAP_MODEL="$ai_model"
 GIT_RECAP_FORMAT="$default_format"
-GIT_RECAP_LANG="$lang"
-GIT_RECAP_VOICE="$voice"
 EOF
 
     info "Configuration saved to $CONFIG_FILE"
@@ -743,32 +578,6 @@ check_dependencies() {
         fi
         check_gh_auth
     fi
-
-    if [[ "$NO_AI" == false ]]; then
-        local mode="${ARG_MODE:-$DEFAULT_MODE}"
-        if [[ "$mode" == "summary" || "$mode" == "bullets" || "$mode" == "all" ]]; then
-            case "$PROVIDER" in
-                claude)
-                    command -v claude &>/dev/null || warn "claude CLI not found — AI will be skipped"
-                    ;;
-                codex)
-                    command -v codex &>/dev/null || warn "codex CLI not found — AI will be skipped"
-                    ;;
-                claude-api)
-                    [[ -n "${ANTHROPIC_API_KEY:-}" ]] || warn "ANTHROPIC_API_KEY not set — AI will be skipped"
-                    ;;
-                openai)
-                    [[ -n "${OPENAI_API_KEY:-}" ]] || warn "OPENAI_API_KEY not set — AI will be skipped"
-                    ;;
-                mistral)
-                    [[ -n "${MISTRAL_API_KEY:-}" ]] || warn "MISTRAL_API_KEY not set — AI will be skipped"
-                    ;;
-                gemini)
-                    [[ -n "${GEMINI_API_KEY:-}" ]] || warn "GEMINI_API_KEY not set — AI will be skipped"
-                    ;;
-            esac
-        fi
-    fi
 }
 
 # ==============================================================================
@@ -997,302 +806,6 @@ fetch_team_commits() {
     info "Found $count commit(s) from $author_count contributor(s)"
 
     echo "$commits"
-}
-
-# ==============================================================================
-# AI
-# ==============================================================================
-
-# OpenAI-compatible API call (works for openai + mistral)
-_call_openai_compatible() {
-    local url="$1" api_key="$2" model="$3" prompt="$4"
-    local escaped_prompt
-    escaped_prompt=$(printf '%s' "$prompt" | _json_escape)
-    local response
-    response=$(curl -s "$url" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $api_key" \
-        -d "{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":${escaped_prompt}}],\"temperature\":0.7}") || true
-    if command -v jq &>/dev/null; then
-        echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true
-    fi
-}
-
-# Anthropic Messages API call
-_call_anthropic() {
-    local api_key="$1" model="$2" prompt="$3"
-    local escaped_prompt
-    escaped_prompt=$(printf '%s' "$prompt" | _json_escape)
-    local response
-    response=$(curl -s "https://api.anthropic.com/v1/messages" \
-        -H "Content-Type: application/json" \
-        -H "x-api-key: $api_key" \
-        -H "anthropic-version: 2023-06-01" \
-        -d "{\"model\":\"${model}\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":${escaped_prompt}}]}") || true
-    if command -v jq &>/dev/null; then
-        echo "$response" | jq -r '.content[0].text // empty' 2>/dev/null || true
-    fi
-}
-
-# Gemini API call
-_call_gemini() {
-    local api_key="$1" model="$2" prompt="$3"
-    local escaped_prompt
-    escaped_prompt=$(printf '%s' "$prompt" | _json_escape)
-    local response
-    response=$(curl -s "https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${api_key}" \
-        -H "Content-Type: application/json" \
-        -d "{\"contents\":[{\"parts\":[{\"text\":${escaped_prompt}}]}],\"generationConfig\":{\"temperature\":0.7}}") || true
-    if command -v jq &>/dev/null; then
-        echo "$response" | jq -r '.candidates[0].content.parts[0].text // empty' 2>/dev/null || true
-    fi
-}
-
-# call_ai <prompt> <spinner_msg> → stdout, returns 0 on success
-call_ai() {
-    local prompt="$1"
-    local spinner_msg="$2"
-
-    if [[ "$NO_AI" == true ]]; then
-        return 1
-    fi
-
-    local result=""
-    local model="$MODEL"
-
-    case "$PROVIDER" in
-        claude)
-            if ! command -v claude &>/dev/null; then
-                warn "claude CLI not found — skipping AI"
-                return 1
-            fi
-            [[ -z "$model" ]] && model="haiku"
-            spinner_start "$spinner_msg"
-            result=$(unset CLAUDECODE; printf '%s' "$prompt" | claude -p --model "$model" 2>/dev/null) || true
-            spinner_stop
-            ;;
-        codex)
-            if ! command -v codex &>/dev/null; then
-                warn "codex CLI not found — skipping AI"
-                return 1
-            fi
-            local codex_args=(exec --ephemeral --skip-git-repo-check -s read-only)
-            [[ -n "$model" ]] && codex_args+=(-m "$model")
-            spinner_start "$spinner_msg"
-            if ! result=$(printf '%s' "$prompt" | codex "${codex_args[@]}" - 2>/dev/null); then
-                spinner_stop
-                warn "codex CLI failed — skipping AI"
-                return 1
-            fi
-            spinner_stop
-            ;;
-        openai)
-            if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-                warn "OPENAI_API_KEY not set — skipping AI"
-                return 1
-            fi
-            [[ -z "$model" ]] && model="gpt-4o-mini"
-            spinner_start "$spinner_msg"
-            result=$(_call_openai_compatible \
-                "https://api.openai.com/v1/chat/completions" \
-                "$OPENAI_API_KEY" "$model" "$prompt") || true
-            spinner_stop
-            ;;
-        mistral)
-            if [[ -z "${MISTRAL_API_KEY:-}" ]]; then
-                warn "MISTRAL_API_KEY not set — skipping AI"
-                return 1
-            fi
-            [[ -z "$model" ]] && model="mistral-small-latest"
-            spinner_start "$spinner_msg"
-            result=$(_call_openai_compatible \
-                "https://api.mistral.ai/v1/chat/completions" \
-                "$MISTRAL_API_KEY" "$model" "$prompt") || true
-            spinner_stop
-            ;;
-        gemini)
-            if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-                warn "GEMINI_API_KEY not set — skipping AI"
-                return 1
-            fi
-            [[ -z "$model" ]] && model="gemini-2.0-flash"
-            spinner_start "$spinner_msg"
-            result=$(_call_gemini "$GEMINI_API_KEY" "$model" "$prompt") || true
-            spinner_stop
-            ;;
-        claude-api)
-            if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-                warn "ANTHROPIC_API_KEY not set — skipping AI"
-                return 1
-            fi
-            [[ -z "$model" ]] && model="claude-haiku-4-5-20251001"
-            spinner_start "$spinner_msg"
-            result=$(_call_anthropic "$ANTHROPIC_API_KEY" "$model" "$prompt") || true
-            spinner_stop
-            ;;
-    esac
-
-    if [[ -n "$result" ]]; then
-        echo "$result"
-        return 0
-    fi
-    return 1
-}
-
-generate_summary() {
-    local commits="$1"
-    local mode="${ARG_MODE:-$DEFAULT_MODE}"
-
-    [[ "$mode" != "summary" && "$mode" != "all" ]] && return
-    [[ -z "$commits" ]] && return
-
-    local messages
-    messages=$(echo "$commits" | cut -f2 | _truncate_messages 200)
-
-    local lang_name voice_instr
-    lang_name=$(_lang_name "$LANG_CODE")
-    voice_instr=$(_voice_instruction "$VOICE_MODE")
-
-    local prompt
-    prompt="You are writing a professional work recap. Below are git commit messages for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
-
-Write a concise summary (3-5 sentences) suitable for a report. Synthesize by themes (features, bug fixes, refactoring, documentation, etc.). Use a professional tone. Do not list individual commits — provide a high-level overview of what was accomplished.
-
-${voice_instr}
-Write your response in ${lang_name}.
-
-Commit messages:
-${messages}"
-
-    local summary
-    if summary=$(call_ai "$prompt" "Generating AI summary..."); then
-        echo "$summary"
-    else
-        warn "AI summary generation failed — skipping"
-    fi
-}
-
-generate_ai_bullets() {
-    local commits="$1"
-    local mode="${ARG_MODE:-$DEFAULT_MODE}"
-
-    [[ "$mode" != "bullets" && "$mode" != "all" ]] && return
-    [[ -z "$commits" ]] && return
-
-    local messages
-    messages=$(echo "$commits" | cut -f2 | _truncate_messages 200)
-
-    local lang_name voice_instr
-    lang_name=$(_lang_name "$LANG_CODE")
-    voice_instr=$(_voice_instruction "$VOICE_MODE")
-
-    local prompt
-    prompt="You are writing bullet points for a work recap. Below are git commit messages for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
-
-Transform these commit messages into clean, readable bullet points for a report:
-- One bullet point per commit, preserving the order of the commit messages below
-- Do not group, merge, or deduplicate entries — every commit must appear
-- Rephrase in clear, professional language
-- Remove conventional commit prefixes (feat:, fix:, chore:, etc.)
-- Output one bullet point per line, without any bullet marker (no -, *, etc.)
-- Do not include any headers or categories — just the items
-
-${voice_instr}
-Write your response in ${lang_name}.
-
-Commit messages:
-${messages}"
-
-    local bullets
-    if bullets=$(call_ai "$prompt" "Generating AI bullet points..."); then
-        echo "$bullets" | _strip_bullet_markers
-    else
-        # Fallback: raw commit messages
-        echo "$messages"
-    fi
-}
-
-# Single AI call for mode=all (summary + bullets in one request)
-# Sets AI_SUMMARY and AI_BULLETS globals, returns 0 on success
-generate_ai_combined() {
-    local commits="$1"
-    [[ -z "$commits" ]] && return 1
-
-    local messages
-    messages=$(echo "$commits" | cut -f2 | _truncate_messages 200)
-
-    local lang_name voice_instr
-    lang_name=$(_lang_name "$LANG_CODE")
-    voice_instr=$(_voice_instruction "$VOICE_MODE")
-
-    local prompt
-    prompt="You are writing a professional work recap. Below are git commit messages for ${PERIOD_LABEL} on the repository ${REPO_NAME}.
-
-PART 1 - SUMMARY:
-Write a concise summary (3-5 sentences) suitable for a report. Synthesize by themes (features, bug fixes, refactoring, documentation, etc.). Use a professional tone. Do not list individual commits — provide a high-level overview.
-
-After the summary, output exactly this separator on its own line:
----SPLIT---
-
-PART 2 - BULLET POINTS:
-Transform the commit messages into clean, readable bullet points:
-- One bullet point per commit, preserving the order of the commit messages below
-- Do not group, merge, or deduplicate entries — every commit must appear
-- Rephrase in clear, professional language
-- Remove conventional commit prefixes (feat:, fix:, chore:, etc.)
-- Output one bullet point per line, without any bullet marker (no -, *, etc.)
-- Do not include any headers or categories — just the items
-
-${voice_instr}
-Write your response in ${lang_name}.
-
-Commit messages:
-${messages}"
-
-    local result
-    if result=$(call_ai "$prompt" "Generating AI recap..."); then
-        if [[ "$result" == *"---SPLIT---"* ]]; then
-            AI_SUMMARY=$(echo "$result" | sed '/---SPLIT---/,$d')
-            AI_BULLETS=$(echo "$result" | sed '1,/---SPLIT---/d' | _strip_bullet_markers)
-            if [[ -n "$AI_SUMMARY" && -n "$AI_BULLETS" ]]; then
-                return 0
-            fi
-        fi
-    fi
-    return 1
-}
-
-# Generate a global team summary from all commits (team mode only)
-generate_team_summary() {
-    local commits="$1"
-    local author_list="$2"
-    local mode="${ARG_MODE:-$DEFAULT_MODE}"
-
-    [[ "$mode" != "summary" && "$mode" != "all" ]] && return
-    [[ -z "$commits" ]] && return
-
-    local messages
-    messages=$(echo "$commits" | cut -f2 | _truncate_messages 200)
-
-    local lang_name voice_instr
-    lang_name=$(_lang_name "$LANG_CODE")
-    voice_instr=$(_voice_instruction "$VOICE_MODE")
-
-    local prompt
-    prompt="You are writing a professional team work recap for a project manager. Below are git commit messages for ${PERIOD_LABEL} on the repository ${REPO_NAME}, from the following contributors: ${author_list}.
-
-Write a concise overall team summary (3-5 sentences) suitable for a management report. Synthesize what the team accomplished collectively by themes (features, bug fixes, refactoring, documentation, infrastructure, etc.). Highlight the major achievements and overall direction of the project. Use a professional tone.
-
-${voice_instr}
-Write your response in ${lang_name}.
-
-Commit messages:
-${messages}"
-
-    local summary
-    if summary=$(call_ai "$prompt" "Generating team summary..."); then
-        echo "$summary"
-    fi
 }
 
 # ==============================================================================
@@ -1636,22 +1149,6 @@ output_team_text() {
     echo "  Busiest weekday: ${busiest_weekday:-N/A}"
     echo ""
 
-    # Global team summary
-    local author_names
-    author_names=$(echo "$authors" | paste -sd', ' -)
-    local team_summary=""
-    if [[ "$mode" == "summary" || "$mode" == "all" ]]; then
-        local global_3f_for_ai
-        global_3f_for_ai=$(echo "$all_commits" | cut -f1-3)
-        team_summary=$(generate_team_summary "$global_3f_for_ai" "$author_names")
-    fi
-    if [[ -n "$team_summary" ]]; then
-        echo "--- Team Summary ---"
-        echo ""
-        echo "$team_summary"
-        echo ""
-    fi
-
     # Top contributors ranking
     echo "--- Contributors ---"
     echo ""
@@ -1682,23 +1179,10 @@ output_team_text() {
         _team_stats_text "$ac_stats" "Stats:"
         echo ""
 
-        # AI content
+        # Raw content (summaries are written by the git-recap agent skill)
         local ac_summary="" ac_bullets=""
         USER_NAME="$author"
-        if [[ "$mode" == "all" ]]; then
-            AI_SUMMARY=""
-            AI_BULLETS=""
-            if generate_ai_combined "$ac"; then
-                ac_summary="$AI_SUMMARY"
-                ac_bullets="$AI_BULLETS"
-            else
-                ac_summary=$(generate_summary "$ac")
-                ac_bullets=$(generate_ai_bullets "$ac")
-            fi
-        else
-            ac_summary=$(generate_summary "$ac")
-            ac_bullets=$(generate_ai_bullets "$ac")
-        fi
+        ac_bullets=$(raw_bullets "$ac")
 
         if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$ac_summary" ]]; then
             echo "  Summary:"
@@ -1774,22 +1258,6 @@ output_team_markdown() {
     echo "| Busiest weekday | ${busiest_weekday:-N/A} |"
     echo ""
 
-    # Global team summary
-    local author_names
-    author_names=$(echo "$authors" | paste -sd', ' -)
-    local team_summary=""
-    if [[ "$mode" == "summary" || "$mode" == "all" ]]; then
-        local global_3f_for_ai
-        global_3f_for_ai=$(echo "$all_commits" | cut -f1-3)
-        team_summary=$(generate_team_summary "$global_3f_for_ai" "$author_names")
-    fi
-    if [[ -n "$team_summary" ]]; then
-        echo "## Team Summary"
-        echo ""
-        echo "$team_summary"
-        echo ""
-    fi
-
     # Contributors ranking
     echo "## Contributors"
     echo ""
@@ -1829,23 +1297,10 @@ output_team_markdown() {
         echo "| Busiest day | ${a_busiest_day} (${a_busiest_count}) |"
         echo ""
 
-        # AI content
+        # Raw content (summaries are written by the git-recap agent skill)
         local ac_summary="" ac_bullets=""
         USER_NAME="$author"
-        if [[ "$mode" == "all" ]]; then
-            AI_SUMMARY=""
-            AI_BULLETS=""
-            if generate_ai_combined "$ac"; then
-                ac_summary="$AI_SUMMARY"
-                ac_bullets="$AI_BULLETS"
-            else
-                ac_summary=$(generate_summary "$ac")
-                ac_bullets=$(generate_ai_bullets "$ac")
-            fi
-        else
-            ac_summary=$(generate_summary "$ac")
-            ac_bullets=$(generate_ai_bullets "$ac")
-        fi
+        ac_bullets=$(raw_bullets "$ac")
 
         if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$ac_summary" ]]; then
             echo "### Summary"
@@ -1905,14 +1360,6 @@ output_team_json() {
     local num_authors
     num_authors=$(echo "$authors" | wc -l | tr -d ' ')
 
-    # Global team summary
-    local author_names
-    author_names=$(echo "$authors" | paste -sd', ' -)
-    local team_summary=""
-    if [[ "$mode" == "summary" || "$mode" == "all" ]]; then
-        team_summary=$(generate_team_summary "$global_3f" "$author_names") || true
-    fi
-
     local json
     json=$(jq -n \
         --arg repo "$REPO_FULL" \
@@ -1954,10 +1401,6 @@ output_team_json() {
             contributors: []
         }')
 
-    if [[ -n "$team_summary" ]]; then
-        json=$(echo "$json" | jq --arg s "$team_summary" '. + {team_summary: $s}')
-    fi
-
     while IFS= read -r author; do
         [[ -z "$author" ]] && continue
         local ac
@@ -1967,23 +1410,10 @@ output_team_json() {
         local a_total a_first a_last a_busiest_day a_busiest_count a_active_days a_avg a_weekday a_streak
         IFS='|' read -r a_total a_first a_last a_busiest_day a_busiest_count a_active_days a_avg a_weekday a_streak <<< "$ac_stats"
 
-        # AI content
+        # Raw content (summaries are written by the git-recap agent skill)
         local ac_summary="" ac_bullets=""
         USER_NAME="$author"
-        if [[ "$mode" == "all" ]]; then
-            AI_SUMMARY=""
-            AI_BULLETS=""
-            if generate_ai_combined "$ac"; then
-                ac_summary="$AI_SUMMARY"
-                ac_bullets="$AI_BULLETS"
-            else
-                ac_summary=$(generate_summary "$ac")
-                ac_bullets=$(generate_ai_bullets "$ac")
-            fi
-        else
-            ac_summary=$(generate_summary "$ac")
-            ac_bullets=$(generate_ai_bullets "$ac")
-        fi
+        ac_bullets=$(raw_bullets "$ac")
 
         local contributor_json
         contributor_json=$(jq -n \
@@ -2090,59 +1520,9 @@ main() {
         info "User: $USER_NAME"
     fi
 
-    # Resolve provider
-    if [[ -n "$ARG_PROVIDER" ]]; then
-        PROVIDER="$ARG_PROVIDER"
-    elif [[ -n "${GIT_RECAP_PROVIDER:-}" ]]; then
-        PROVIDER="$GIT_RECAP_PROVIDER"
-    else
-        PROVIDER="$DEFAULT_PROVIDER"
-    fi
-
-    # Codex owns its default model selection; only an explicit CLI flag may
-    # override it. Other providers retain the saved-model fallback.
-    if [[ -n "$ARG_MODEL" ]]; then
-        MODEL="$ARG_MODEL"
-    elif [[ "$PROVIDER" != "codex" && -n "${GIT_RECAP_MODEL:-}" ]]; then
-        MODEL="$GIT_RECAP_MODEL"
-    else
-        MODEL=""
-    fi
-
     # Resolve format from config if not set via CLI
     if [[ -z "$ARG_FORMAT" && -n "${GIT_RECAP_FORMAT:-}" ]]; then
         ARG_FORMAT="$GIT_RECAP_FORMAT"
-    fi
-
-    # Resolve language
-    if [[ -n "$ARG_LANG" ]]; then
-        LANG_CODE="$ARG_LANG"
-    elif [[ -n "${GIT_RECAP_LANG:-}" ]]; then
-        LANG_CODE="$GIT_RECAP_LANG"
-    else
-        LANG_CODE="$DEFAULT_LANG"
-    fi
-
-    # Resolve voice: normalize je→I, nous→we
-    if [[ -n "$ARG_VOICE" ]]; then
-        VOICE_MODE="$ARG_VOICE"
-    elif [[ -n "${GIT_RECAP_VOICE:-}" ]]; then
-        VOICE_MODE="$GIT_RECAP_VOICE"
-    else
-        VOICE_MODE="$DEFAULT_VOICE"
-    fi
-    case "$VOICE_MODE" in
-        je|i) VOICE_MODE="I" ;;
-        nous|We) VOICE_MODE="we" ;;
-    esac
-
-    # Default voice to neutral/nominal in team mode (unless user explicitly set a voice)
-    if [[ "$ARG_TEAM" == true && -z "$ARG_VOICE" && -z "${GIT_RECAP_VOICE:-}" ]]; then
-        if [[ "$LANG_CODE" == "fr" ]]; then
-            VOICE_MODE="nominal"
-        else
-            VOICE_MODE="neutral"
-        fi
     fi
 
     # Resolve repo
@@ -2247,24 +1627,9 @@ No commits found for ${USER_NAME} during this period.
     local stats
     stats=$(compute_stats "$commits")
 
-    # Generate AI content
+    # Raw content (summaries are written by the git-recap agent skill)
     local summary="" bullets=""
-    local mode="${ARG_MODE:-$DEFAULT_MODE}"
-
-    if [[ "$mode" == "all" && -n "$commits" ]]; then
-        AI_SUMMARY=""
-        AI_BULLETS=""
-        if generate_ai_combined "$commits"; then
-            summary="$AI_SUMMARY"
-            bullets="$AI_BULLETS"
-        else
-            summary=$(generate_summary "$commits")
-            bullets=$(generate_ai_bullets "$commits")
-        fi
-    else
-        summary=$(generate_summary "$commits")
-        bullets=$(generate_ai_bullets "$commits")
-    fi
+    bullets=$(raw_bullets "$commits")
 
     # Format output
     local output

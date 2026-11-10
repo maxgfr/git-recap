@@ -1,18 +1,33 @@
 # git-recap
 
-Commit recap generator — AI-powered summaries, bullet points, and commit lists.
+Commit recap generator: stats, bullet points and commit lists from git history, with AI-written summaries through an agent skill.
 
-Supports multiple AI providers: **Claude** (CLI & API), **Codex CLI**, **OpenAI**, **Mistral**, **Gemini**.
+- **CLI** (`git-recap`): deterministic data such as commits, stats, raw bullets in text, markdown or JSON. It never calls an AI model.
+- **Agent skill** (`skills/git-recap`): your coding agent (Claude Code, Codex, Cursor, …) runs the CLI, then writes the summary and bullet points with its own model and renders the final recap.
 
 ## Installation
 
-### Homebrew
+### Agent skill
+
+```bash
+npx skills add maxgfr/git-recap
+```
+
+The skill bundles its own copy of the CLI, so no other install is needed. Then ask your agent:
+
+- "Recap my commits this month on this repo"
+- "Team recap of maxgfr/subtool for last month, in French, as markdown in recap.md"
+- "What did I ship in 2025? First person."
+
+Language (`en`, `fr`, …) and voice (`I`, `we`, `neutral` such as "Implementation of…", or `nominal` such as "Mise en place de…") come from your request.
+
+### CLI: Homebrew
 
 ```bash
 brew install maxgfr/tap/git-recap
 ```
 
-### Manual
+### CLI: manual
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/maxgfr/git-recap/main/script.sh -o /usr/local/bin/git-recap
@@ -23,13 +38,6 @@ chmod +x /usr/local/bin/git-recap
 
 - `git`
 - `gh` (GitHub CLI, authenticated, for remote GitHub repositories)
-- One of the AI providers (optional):
-  - `claude` CLI for Claude (default)
-  - `codex` CLI for Codex
-  - `ANTHROPIC_API_KEY` env var for Claude API (without CLI)
-  - `OPENAI_API_KEY` env var for OpenAI/ChatGPT
-  - `MISTRAL_API_KEY` env var for Mistral
-  - `GEMINI_API_KEY` env var for Gemini
 - `jq` (required for `-f json` and `curl` fallback)
 
 ## Usage
@@ -46,18 +54,12 @@ Options:
                            current-month, last-month, current-week, last-week,
                            current-year, last-year, all, <N>, YYYY-MM, YYYY
   -m, --mode <mode>       Mode: summary, commits, bullets, all (default: all)
+                          (bullets are raw commit messages; summaries come from the skill)
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
   -b, --branch <branch>   Branch (default: auto-detected)
-  --provider <provider>   AI provider: claude, codex, claude-api, openai, mistral, gemini (default: claude)
-  --model <model>         AI model override (see defaults below)
-  --lang <lang>           Language for AI output: en, fr, es, de, ... (default: en)
-  --voice <voice>         Narrative voice: I, we, neutral, or nominal (default: neutral)
-                          neutral: noun-based English ("Implementation of...")
-                          nominal: noun-based French ("Mise en place de...")
   --team                  Team mode: all contributors, grouped by author
   --all-branches          Fetch commits from all branches
-  --no-ai                 Skip AI generation (summary/bullets)
   --init                  Initialize configuration
   -h, --help              Show this help
   -v, --version           Show version
@@ -77,49 +79,6 @@ Options:
 | `<N>` | Last N months |
 | `YYYY-MM` | Specific month (e.g., `2026-01`) |
 | `YYYY` | Specific year (e.g., `2025`) |
-
-### AI Providers & Default Models
-
-| Provider | Flag | Default Model | Requires |
-|----------|------|---------------|----------|
-| Claude (CLI) | `--provider claude` | `haiku` | `claude` CLI |
-| Codex (CLI) | `--provider codex` | Codex configuration | `codex` CLI |
-| Claude (API) | `--provider claude-api` | `claude-haiku-4-5-20251001` | `ANTHROPIC_API_KEY` |
-| OpenAI | `--provider openai` | `gpt-4o-mini` | `OPENAI_API_KEY` |
-| Mistral | `--provider mistral` | `mistral-small-latest` | `MISTRAL_API_KEY` |
-| Gemini | `--provider gemini` | `gemini-2.0-flash` | `GEMINI_API_KEY` |
-
-Override the model with `--model`:
-
-```bash
-git-recap --provider claude --model sonnet maxgfr/subtool
-git-recap --provider codex maxgfr/subtool
-git-recap --provider codex --model <model-id> maxgfr/subtool
-git-recap --provider claude-api --model claude-sonnet-4-6 maxgfr/subtool
-git-recap --provider openai --model gpt-4o maxgfr/subtool
-git-recap --provider gemini --model gemini-1.5-pro maxgfr/subtool
-```
-
-### Language & Voice
-
-Control the language and narrative voice of AI-generated content:
-
-```bash
-# Default: noun-based neutral style ("Implementation of...", "Optimization of...")
-git-recap maxgfr/subtool
-
-# First person singular
-git-recap --voice I maxgfr/subtool
-
-# Team voice ("we implemented...", "we fixed...")
-git-recap --voice we maxgfr/subtool
-
-# Noun-based French style ("Mise en place de...", "Optimisation de...")
-git-recap --voice nominal maxgfr/subtool
-
-# French language output
-git-recap --lang fr maxgfr/subtool
-```
 
 ### Team Mode
 
@@ -157,29 +116,11 @@ git-recap -p 2025 maxgfr/subtool
 # Specific month, commits only
 git-recap -p 2026-01 -m commits maxgfr/subtool
 
-# Use Claude API (without CLI)
-git-recap --provider claude-api maxgfr/subtool
-
-# Use the authenticated Codex CLI (no API key required)
-git-recap --provider codex maxgfr/subtool
-
-# Use Mistral AI
-git-recap --provider mistral maxgfr/subtool
-
-# Use Gemini with a specific model
-git-recap --provider gemini --model gemini-1.5-pro maxgfr/subtool
-
 # JSON output
 git-recap -f json -m commits maxgfr/subtool | jq .
 
-# No AI, just raw data
-git-recap --no-ai -m all maxgfr/subtool
-
 # Team mode
 git-recap --team maxgfr/subtool
-
-# French recap
-git-recap --lang fr maxgfr/subtool
 
 # From various URL formats
 git-recap https://github.com/maxgfr/subtool
@@ -205,11 +146,8 @@ git recap maxgfr/subtool
   Last commit:   2026-03-13
   Busiest day:   2026-03-08 (14 commits)
 
---- Summary ---
-[AI-generated summary]
-
 --- Changes ---
-  * [AI-generated bullet points]
+  • fix: translate text-only
 
 --- Commits ---
   7354b0c - fix: translate text-only (2026-03-13)
@@ -218,11 +156,13 @@ git recap maxgfr/subtool
 
 ### Markdown
 
-Stats table, AI summary, bullet list, and commit table. Hashes link to GitHub when the repository has a GitHub remote.
+Stats table, bullet list, and commit table. Hashes link to GitHub when the repository has a GitHub remote.
 
 ### JSON
 
-Structured output with `repo`, `period`, `stats`, `summary`, `bullets[]`, and `commits[]` fields.
+Structured output with `repo`, `period`, `since`, `until`, `stats`, `bullets[]` and `commits[]` fields. In team mode, it has `global_stats` and `contributors[]`. This is what the agent skill reads. It adds `summary` (and `team_summary`) and rewrites `bullets`.
+
+With the skill, the agent inserts a Summary section and rewritten bullets into these same layouts.
 
 ## Configuration
 
@@ -230,12 +170,12 @@ Run `git-recap --init` to create `~/.git-recaprc`:
 
 ```bash
 GIT_RECAP_USER="maxgfr"
-GIT_RECAP_PROVIDER="claude"
-GIT_RECAP_MODEL=""
 GIT_RECAP_FORMAT="text"
-GIT_RECAP_LANG="en"
-GIT_RECAP_VOICE="neutral"
 ```
+
+## Migrating from 1.x
+
+git-recap 2.0 removes the built-in AI providers. `--provider`, `--model`, `--lang` and `--voice` now exit with an error, and `--no-ai` is accepted but does nothing. Install the agent skill (`npx skills add maxgfr/git-recap`) and ask your agent for the recap instead. Legacy `GIT_RECAP_PROVIDER/MODEL/LANG/VOICE` lines in `~/.git-recaprc` are ignored.
 
 ## License
 

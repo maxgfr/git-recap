@@ -5,4 +5,5 @@ if [ -z "$1" ]; then
 fi
 NEW_VERSION="$1"
 sed -i.bak "s/^VERSION=\".*\"/VERSION=\"$NEW_VERSION\"/" script.sh && rm script.sh.bak
-echo "Updated script.sh to version $NEW_VERSION"
+cp script.sh skills/git-recap/scripts/git-recap.sh
+echo "Updated script.sh and the bundled skill script to version $NEW_VERSION"

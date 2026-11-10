@@ -5,7 +5,8 @@
 - Keep `script.sh` portable across the Bash versions used by macOS and Ubuntu CI.
 - Treat stdout as generated recap data; send diagnostics and progress to stderr.
 - Parse configuration as data. Preserve the existing rule that `~/.git-recaprc` is never sourced.
-- Keep CLI providers read-only and non-interactive. Codex calls use `codex exec --ephemeral` with a read-only sandbox.
+- `script.sh` never calls an AI model. AI writing (summaries, rewritten bullets, final rendering) lives in the agent skill `skills/git-recap/SKILL.md`.
+- Keep `skills/git-recap/scripts/git-recap.sh` byte-identical to `script.sh` (`cp script.sh skills/git-recap/scripts/git-recap.sh`); the test suite enforces it.
 
 ## Verification
 
