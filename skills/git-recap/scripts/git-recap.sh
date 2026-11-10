@@ -1661,6 +1661,12 @@ main() {
         exit 0
     fi
 
+    # Resolve format from config if not set via CLI (before validation, so a
+    # bad config value is rejected like a bad -f)
+    if [[ -z "$ARG_FORMAT" && -n "${GIT_RECAP_FORMAT:-}" ]]; then
+        ARG_FORMAT="$GIT_RECAP_FORMAT"
+    fi
+
     validate_args
 
     # Resolve user: CLI flag > config > auto-detect
@@ -1685,11 +1691,6 @@ main() {
             [[ -n "$USER_NAME" ]] || die "Could not detect GitHub user. Use -u or run --init"
         fi
         info "User: $USER_NAME"
-    fi
-
-    # Resolve format from config if not set via CLI
-    if [[ -z "$ARG_FORMAT" && -n "${GIT_RECAP_FORMAT:-}" ]]; then
-        ARG_FORMAT="$GIT_RECAP_FORMAT"
     fi
 
     # Resolve repo

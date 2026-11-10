@@ -478,6 +478,51 @@ rm -rf "$data_dir"
 
 echo ""
 
+# ---------- Regression tests ----------
+
+echo "$(_bold "Regressions")"
+
+reg_dir=$(mktemp -d /tmp/git-recap-reg.XXXXXX)
+reg_home="$reg_dir/home"
+reg_repo="$reg_dir/repo"
+mkdir -p "$reg_home"
+
+# _reg_init <dir> : empty repository with a fixed identity
+_reg_init() {
+    mkdir -p "$1"
+    git -C "$1" init -q -b main
+    git -C "$1" config user.name "Recap Tester"
+    git -C "$1" config user.email "recap@example.invalid"
+    git -C "$1" config commit.gpgsign false
+}
+
+# _reg_commit <dir> <date> <author> <subject> [body]
+_reg_commit() {
+    local dir="$1" date="$2" author="$3" subject="$4" body="${5:-}"
+    local msg_args=(-m "$subject")
+    [[ -n "$body" ]] && msg_args+=(-m "$body")
+    GIT_AUTHOR_DATE="${date}T12:00:00" GIT_COMMITTER_DATE="${date}T12:00:00" \
+        git -C "$dir" -c user.name="$author" commit -q --allow-empty --allow-empty-message "${msg_args[@]}"
+}
+
+_reg_init "$reg_repo"
+_reg_commit "$reg_repo" 2025-01-10 "Recap Tester" "feat: first"
+_reg_commit "$reg_repo" 2025-01-11 "Jane Doe" "fix: second"
+
+# Config: an invalid format from ~/.git-recaprc is rejected like an invalid -f
+mkdir -p "$reg_dir/badhome"
+printf '%s\n' 'GIT_RECAP_FORMAT="xml"' > "$reg_dir/badhome/.git-recaprc"
+assert_exit "invalid config format exits 1 (single)" 1 env HOME="$reg_dir/badhome" "$GIT_RECAP" -p all -u "Recap Tester" "$reg_repo"
+assert_exit "invalid config format exits 1 (team)" 1 env HOME="$reg_dir/badhome" "$GIT_RECAP" --team -p all "$reg_repo"
+err=$(HOME="$reg_dir/badhome" "$GIT_RECAP" --team -p all "$reg_repo" 2>&1 || true)
+assert_contains "invalid config format is reported" "$err" "Invalid format: xml"
+out=$(HOME="$reg_dir/badhome" "$GIT_RECAP" --team -f text -p all "$reg_repo" 2>/dev/null)
+assert_contains "-f overrides an invalid config format" "$out" "Team Recap"
+
+rm -rf "$reg_dir"
+
+echo ""
+
 # ---------- Agent skill ----------
 
 echo "$(_bold "Agent skill")"
