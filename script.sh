@@ -587,40 +587,36 @@ resolve_repo() {
         return
     fi
 
+    # A path that is not a work tree must not be mistaken for a GitHub repo
+    case "$repo" in
+        .|..|./*|../*|/*|"~"*) die "Not a git repository: $repo" ;;
+    esac
+
     REPO_MODE="remote"
 
-    # GitHub URL
-    if [[ "$repo" == https://github.com/* ]]; then
-        REPO_FULL=$(echo "$repo" | sed -E 's#^https://github\.com/##; s/\.git$//; s#/$##')
-        REPO_NAME="${REPO_FULL##*/}"
-        REPO_WEB_URL="https://github.com/${REPO_FULL}"
-        info "Repo: $REPO_FULL"
-        return
-    fi
+    local via=""
+    case "$repo" in
+        https://github.com/*|git@github.com:*)
+            # Keep owner/repo only: URLs copied from a browser carry /tree/..., /pull/...
+            repo=$(printf '%s\n' "$repo" | sed -E 's#^(https://github\.com/|git@github\.com:)##; s#^([^/]+/[^/]+).*#\1#; s/\.git$//')
+            ;;
+        */*) ;;
+        *)
+            # repo name only — prefix with username
+            [[ -n "$USER_NAME" ]] || die "Cannot resolve \"$repo\" without a GitHub user. Use owner/repo or -u"
+            repo="${USER_NAME}/${repo}"
+            via=" (using user: $USER_NAME)"
+            ;;
+    esac
 
-    # SSH URL
-    if [[ "$repo" == git@github.com:* ]]; then
-        REPO_FULL=$(echo "$repo" | sed -E 's#^git@github\.com:##; s/\.git$//')
-        REPO_NAME="${REPO_FULL##*/}"
-        REPO_WEB_URL="https://github.com/${REPO_FULL}"
-        info "Repo: $REPO_FULL"
-        return
-    fi
+    # The name goes into API paths: accept what GitHub accepts, nothing else
+    [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+        || die "Invalid repository: $ARG_REPO (expected owner/repo, a GitHub URL or a local path)"
 
-    # owner/repo
-    if [[ "$repo" == */* ]]; then
-        REPO_FULL="$repo"
-        REPO_NAME="${REPO_FULL##*/}"
-        REPO_WEB_URL="https://github.com/${REPO_FULL}"
-        info "Repo: $REPO_FULL"
-        return
-    fi
-
-    # repo name only — prefix with username
-    REPO_FULL="${USER_NAME}/${repo}"
-    REPO_NAME="$repo"
+    REPO_FULL="$repo"
+    REPO_NAME="${REPO_FULL##*/}"
     REPO_WEB_URL="https://github.com/${REPO_FULL}"
-    info "Repo: $REPO_FULL (using user: $USER_NAME)"
+    info "Repo: ${REPO_FULL}${via}"
 }
 
 # _local_ref_exists <ref> : true when <ref> names a commit in the local repo

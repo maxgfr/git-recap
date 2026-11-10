@@ -256,6 +256,25 @@ out=$(
 )
 assert_eq "SSH URL without .git resolves" "owner/repo|repo|remote" "$out"
 
+# _resolve <repo arg> [user] → REPO_FULL|REPO_NAME|REPO_WEB_URL, or "died"
+_resolve() {
+    (
+        # shellcheck disable=SC2034
+        ARG_REPO="$1" USER_NAME="${2:-}" REPO_MODE="" REPO_FULL="" REPO_NAME=""
+        resolve_repo 2>/dev/null
+        echo "${REPO_FULL}|${REPO_NAME}|${REPO_WEB_URL}"
+    ) || echo "died"
+}
+assert_eq "browser URL keeps owner/repo only" "maxgfr/subtool|subtool|https://github.com/maxgfr/subtool" "$(_resolve "https://github.com/maxgfr/subtool/tree/main/src")"
+assert_eq "URL with .git and trailing slash" "maxgfr/subtool|subtool|https://github.com/maxgfr/subtool" "$(_resolve "https://github.com/maxgfr/subtool.git/")"
+assert_eq "repo name with dots" "maxgfr/my.repo-1|my.repo-1|https://github.com/maxgfr/my.repo-1" "$(_resolve "maxgfr/my.repo-1")"
+assert_eq "bare name uses the user" "me/thing|thing|https://github.com/me/thing" "$(_resolve "thing" "me")"
+assert_eq "bare name without a user is rejected" "died" "$(_resolve "thing")"
+assert_eq "extra path segments are rejected" "died" "$(_resolve "owner/repo/extra")"
+assert_eq "characters GitHub does not allow are rejected" "died" "$(_resolve "owner/re po?x=1")"
+assert_eq "missing absolute path is not a GitHub repo" "died" "$(_resolve "/no/such/path")"
+assert_eq "missing relative path is not a GitHub repo" "died" "$(_resolve "./nope")"
+
 echo ""
 
 # ---------- compute_stats ----------
@@ -614,6 +633,15 @@ err=$(HOME="$reg_home" "$GIT_RECAP" -p 2026-13 -u x "$reg_repo" 2>&1 || true)
 assert_contains "invalid month is reported" "$err" "Invalid period: 2026-13"
 assert_not_contains "invalid period fails before the repo is resolved" "$err" "Local repo"
 
+# A path that is not a repository is an error, not a GitHub lookup
+mkdir -p "$reg_dir/plain"
+err=$(cd "$reg_dir/plain" && PATH="$mock_dir/bin:$PATH" HOME="$reg_home" "$GIT_RECAP" -p all -u recaptester . 2>&1)
+assert_eq "\".\" outside a repository exits 1" "1" "$?"
+assert_contains "\".\" outside a repository is reported" "$err" "Not a git repository: ."
+assert_not_contains "\".\" outside a repository is not sent to GitHub" "$err" "Repo:"
+err=$(PATH="$mock_dir/bin:$PATH" HOME="$reg_home" "$GIT_RECAP" -p all -u recaptester /no/such/path 2>&1)
+assert_contains "missing path is reported" "$err" "Not a git repository: /no/such/path"
+
 # Local branches: unknown or option-like names fail instead of "No commits found"
 assert_exit "unknown local branch exits 1" 1 env HOME="$reg_home" "$GIT_RECAP" -b does-not-exist -p all -u "Recap Tester" "$reg_repo"
 err=$(HOME="$reg_home" "$GIT_RECAP" -b does-not-exist -p all -u "Recap Tester" "$reg_repo" 2>&1 || true)
@@ -777,6 +805,11 @@ assert_eq "curl fallback exits 1 on an HTTP error" "1" "$?"
 assert_contains "curl fallback reports the HTTP error" "$err" "Access denied"
 err=$(CURL_MOCK_STATUS=404 _curl_run --team -p all mock/repo 2>&1 >/dev/null)
 assert_contains "curl fallback reports a missing repository" "$err" "Repository not found: mock/repo"
+
+# Team mode with a bare repo name needs a user to build owner/repo
+err=$(_curl_run --team -p all barename 2>&1 >/dev/null)
+assert_eq "bare repo name without a user exits 1" "1" "$?"
+assert_contains "bare repo name without a user is reported" "$err" "without a GitHub user"
 
 rm -rf "$reg_dir"
 
