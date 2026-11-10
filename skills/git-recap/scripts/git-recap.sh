@@ -701,10 +701,29 @@ check_dependencies() {
 # Commits travel as TSV: hash, subject, date, plus the author in team mode.
 # Every fetcher takes <mode> ("team" or "") and <fields> (3 or 4).
 
+# _urlencode <string> → percent-encoded query parameter value (byte-wise)
+_urlencode() {
+    local LC_ALL=C
+    local s="$1" out="" c code hex i
+    for (( i = 0; i < ${#s}; i++ )); do
+        c="${s:i:1}"
+        case "$c" in
+            [a-zA-Z0-9._~/-]) out+="$c" ;;
+            *)
+                printf -v code '%d' "'$c"
+                printf -v hex '%%%02X' $(( code & 255 ))
+                out+="$hex"
+                ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 # _commits_query <branch> <mode> → query string for the GitHub commits endpoint
 _commits_query() {
-    local query="sha=${1}"
-    [[ "$2" == "team" ]] || query+="&author=${USER_NAME}"
+    local query
+    query="sha=$(_urlencode "$1")"
+    [[ "$2" == "team" ]] || query+="&author=$(_urlencode "$USER_NAME")"
     query+="&per_page=100"
     [[ -n "$SINCE" ]] && query+="&since=${SINCE}Z"
     [[ -n "$UNTIL" ]] && query+="&until=${UNTIL}Z"

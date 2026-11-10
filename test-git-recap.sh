@@ -197,6 +197,13 @@ _period() {
     )
 }
 
+echo "$(_bold "  _urlencode")"
+
+assert_eq "_urlencode keeps unreserved characters and slashes" "feature/a-b_c.d~1" "$(_urlencode "feature/a-b_c.d~1")"
+assert_eq "_urlencode escapes query delimiters" "feature/%23123%20a%26b%2Bc%3Dd%25" "$(_urlencode "feature/#123 a&b+c=d%")"
+assert_eq "_urlencode escapes brackets" "dependabot%5Bbot%5D" "$(_urlencode "dependabot[bot]")"
+assert_eq "_urlencode escapes UTF-8 bytes" "%C3%A9t%C3%A9" "$(_urlencode "été")"
+
 echo "$(_bold "  compute_period")"
 
 assert_eq "current-week on a Monday starts that day" \
@@ -676,6 +683,12 @@ assert_contains "404 with -b mentions the branch" "$err" "(branch: nope)"
 out=$(GH_MOCK_FAIL=409 GH_MOCK_FAIL_ON=commits _mock_run -p all -u recaptester mock/repo 2>/dev/null)
 assert_eq "empty remote repository exits 0" "0" "$?"
 assert_contains "empty remote repository reports no commits" "$out" "No commits found"
+
+# Branch and author reach the API percent-encoded ("#" would cut the query short)
+GH_MOCK_LOG="$reg_dir/gh.log" _mock_run -b "feature/#123" -p 2025-03 -u "Jane Doe" mock/repo >/dev/null 2>&1
+assert_contains "branch is percent-encoded in the query" "$(cat "$reg_dir/gh.log")" "sha=feature/%23123&"
+assert_contains "author is percent-encoded in the query" "$(cat "$reg_dir/gh.log")" "author=Jane%20Doe&"
+assert_contains "the rest of the query survives" "$(cat "$reg_dir/gh.log")" "since=2025-03-01T00:00:00Z"
 
 # gh warnings on stderr are not parsed as commits
 out=$(GH_MOCK_STDERR="warning: something on stderr" _mock_run -f json -p all -u recaptester mock/repo 2>/dev/null)
