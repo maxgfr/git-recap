@@ -253,41 +253,64 @@ _is_release_commit() {
     [[ "$1" =~ ^chore\(release\) || "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
-_is_excluded_author() {
-    local author="$1" pattern lower_author lower_pattern
-    lower_author=$(printf '%s' "$author" | tr '[:upper:]' '[:lower:]')
-    while IFS= read -r pattern; do
-        [[ -z "$pattern" ]] && continue
-        lower_pattern=$(printf '%s' "$pattern" | tr '[:upper:]' '[:lower:]')
-        # A literal name first ("dependabot[bot]" is not a character class), then a glob
-        # shellcheck disable=SC2053  # glob matching is intended
-        [[ "$lower_author" == "$lower_pattern" || "$lower_author" == $lower_pattern ]] && return 0
-    done <<< "$ARG_EXCLUDE_AUTHORS"
-    return 1
+# _lowercase : stdin → stdout in lower case. Text that is not valid in the
+# current locale (BSD tr stops on it) is lowercased byte-wise instead.
+_lowercase() {
+    local text out
+    text=$(cat)
+    out=$(printf '%s\n' "$text" | tr '[:upper:]' '[:lower:]' 2>/dev/null) \
+        || out=$(printf '%s\n' "$text" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+    printf '%s\n' "$out"
 }
 
-# filter_noise : stdin = commit TSV (author in field 4 when present).
+# filter_noise <fields> : stdin = commit rows (author in field 4 when <fields> is 4).
 # Drops bot authors, release commits and --exclude-author matches.
 filter_noise() {
-    local line subject author kept="" skipped=0
-    while IFS= read -r line; do
+    local fields="$1" rows line rest subject author="" skipped=0
+    rows=$(cat)
+    [[ -z "$rows" ]] && return 0
+
+    # --exclude-author is case-insensitive: lowercase the patterns and the
+    # author column once, instead of forking for every commit
+    local exclude=false patterns=() pattern lowered="" lower_author=""
+    if [[ "$fields" -eq 4 && -n "$ARG_EXCLUDE_AUTHORS" ]]; then
+        while IFS= read -r pattern; do
+            [[ -n "$pattern" ]] && patterns+=("$pattern")
+        done <<< "$(printf '%s' "$ARG_EXCLUDE_AUTHORS" | _lowercase)"
+        if [[ ${#patterns[@]} -gt 0 ]]; then
+            exclude=true
+            lowered=$(printf '%s\n' "$rows" | LC_ALL=C cut -f4 | _lowercase)
+        fi
+    fi
+
+    # Rows on fd 3, lowercased authors on fd 4, read in step
+    while IFS= read -r line <&3; do
+        [[ "$exclude" == true ]] && { IFS= read -r lower_author <&4 || true; }
         [[ -z "$line" ]] && continue
-        author=""
-        IFS=$'\t' read -r _ subject _ author <<< "$line"
+        rest="${line#*$'\t'}"
+        subject="${rest%%$'\t'*}"
+        [[ "$fields" -eq 4 ]] && author="${line##*$'\t'}"
+
         if [[ "$ARG_ALL_COMMITS" == false ]] && { _is_release_commit "$subject" || { [[ -n "$author" ]] && _is_bot_author "$author"; }; }; then
             skipped=$((skipped + 1))
             continue
         fi
-        if [[ -n "$author" && -n "$ARG_EXCLUDE_AUTHORS" ]] && _is_excluded_author "$author"; then
-            skipped=$((skipped + 1))
-            continue
+        if [[ "$exclude" == true ]]; then
+            for pattern in "${patterns[@]}"; do
+                # A literal name first ("dependabot[bot]" is not a character class), then a glob
+                # shellcheck disable=SC2053  # glob matching is intended
+                if [[ "$lower_author" == "$pattern" || "$lower_author" == $pattern ]]; then
+                    skipped=$((skipped + 1))
+                    continue 2
+                fi
+            done
         fi
-        kept+="${line}"$'\n'
-    done
+        printf '%s\n' "$line"
+    done 3<<< "$rows" 4<<< "$lowered"
+
     if [[ $skipped -gt 0 ]]; then
         info "Skipped $skipped bot/release/excluded commit(s) (use --all-commits to keep bots and releases)"
     fi
-    printf '%s' "$kept"
 }
 
 _markdown_commit_ref() {
@@ -907,7 +930,7 @@ fetch_commits() {
         commits=$(_fetch_github "$mode" "$fields") || exit 1
     fi
 
-    commits=$(printf '%s\n' "$commits" | filter_noise)
+    commits=$(printf '%s\n' "$commits" | filter_noise "$fields")
 
     if [[ -z "$commits" ]]; then
         if [[ "$mode" == "team" ]]; then
