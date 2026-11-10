@@ -81,6 +81,75 @@ assert_exit() {
 }
 
 # ==============================================================================
+# gh mock
+# ==============================================================================
+# Remote tests talk to the GitHub API through gh. A mock serves fixtures for the
+# deterministic tests, and replaces the real gh for the whole suite when no
+# credentials are available (or with GIT_RECAP_OFFLINE=1).
+#
+#   GH_MOCK_COMMITS         commits fixture (default: commits.json)
+#   GH_MOCK_BRANCHES        branches fixture (default: a single "main")
+#   GH_MOCK_DEFAULT_BRANCH  default branch name (default: main)
+#   GH_MOCK_FAIL            HTTP status to fail every api call with (e.g. 404)
+#   GH_MOCK_AUTH_RC         exit code of `gh auth status` (default: 0)
+#   GH_MOCK_LOG             file receiving one line per gh invocation
+# A fixture named commits-<branch>.json next to the mock is served for sha=<branch>.
+
+mock_dir=$(mktemp -d /tmp/git-recap-mock.XXXXXX)
+mkdir -p "$mock_dir/bin"
+cat > "$mock_dir/bin/gh" <<'MOCK_GH'
+#!/usr/bin/env bash
+dir="$(cd "$(dirname "$0")/.." && pwd)"
+[[ -n "${GH_MOCK_LOG:-}" ]] && printf '%s\n' "$1 ${2:-}" >> "$GH_MOCK_LOG"
+[[ "$1" == "auth" ]] && exit "${GH_MOCK_AUTH_RC:-0}"
+[[ "$1" == "api" ]] || exit 1
+path="$2"; shift 2
+filter="."
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --jq) filter="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [[ -n "${GH_MOCK_FAIL:-}" ]]; then
+    printf '{"message":"Mock failure","status":"%s"}\n' "$GH_MOCK_FAIL"
+    printf 'gh: Mock failure (HTTP %s)\n' "$GH_MOCK_FAIL" >&2
+    exit 1
+fi
+case "$path" in
+    user) printf '%s\n' '{"login":"recaptester"}' | jq -r "$filter" ;;
+    *"/branches"*)
+        if [[ -n "${GH_MOCK_BRANCHES:-}" ]]; then
+            jq -r "$filter" "$GH_MOCK_BRANCHES"
+        else
+            printf '%s\n' '[{"name":"main"}]' | jq -r "$filter"
+        fi ;;
+    *"/commits"*)
+        sha=$(printf '%s\n' "$path" | sed -n 's/.*[?&]sha=\([^&]*\).*/\1/p')
+        fixture="${GH_MOCK_COMMITS:-$dir/commits.json}"
+        [[ -n "$sha" && -f "$dir/commits-$sha.json" ]] && fixture="$dir/commits-$sha.json"
+        jq -r "$filter" "$fixture" ;;
+    *) printf '{"default_branch":"%s"}\n' "${GH_MOCK_DEFAULT_BRANCH:-main}" | jq -r "$filter" ;;
+esac
+MOCK_GH
+chmod +x "$mock_dir/bin/gh"
+cat > "$mock_dir/commits.json" <<'FIXTURE'
+[
+  {"sha": "aaaaaaa1111", "parents": [{"sha": "p0"}], "author": {"login": "recaptester"},
+   "commit": {"message": "feat: remote feature\n\nWhy: users asked\twith a tab", "author": {"name": "Recap Tester", "date": "2025-03-02T10:00:00Z"}}},
+  {"sha": "bbbbbbb2222", "parents": [{"sha": "p0"}, {"sha": "p1"}], "author": {"login": "recaptester"},
+   "commit": {"message": "Merge pull request #1 from x/y", "author": {"name": "Recap Tester", "date": "2025-03-03T10:00:00Z"}}},
+  {"sha": "ccccccc3333", "parents": [{"sha": "p0"}], "author": {"login": "semantic-release-bot"},
+   "commit": {"message": "chore(release): 1.2.0", "author": {"name": "semantic-release-bot", "date": "2025-03-04T10:00:00Z"}}}
+]
+FIXTURE
+
+if [[ -n "${GIT_RECAP_OFFLINE:-}" ]] || ! command -v gh &>/dev/null || ! gh auth status &>/dev/null; then
+    echo "gh credentials unavailable (or GIT_RECAP_OFFLINE set): remote tests use the gh mock"
+    export PATH="$mock_dir/bin:$PATH"
+fi
+
+# ==============================================================================
 # Unit tests (source script without running main)
 # ==============================================================================
 
@@ -374,7 +443,7 @@ echo "$(_bold "Recap data")"
 
 data_dir=$(mktemp -d /tmp/git-recap-data.XXXXXX)
 data_repo="$data_dir/repo"
-mkdir -p "$data_repo" "$data_dir/bin"
+mkdir -p "$data_repo"
 git -C "$data_repo" init -q -b main
 git -C "$data_repo" config user.email "recap@example.invalid"
 
@@ -435,42 +504,13 @@ assert_exit "-p with --since exits 1" 1 "$GIT_RECAP" -p all --since 2025-01-01 "
 assert_exit "invalid --since date exits 1" 1 "$GIT_RECAP" --since 2025-13 "$data_repo"
 assert_exit "--since after --until exits 1" 1 "$GIT_RECAP" --since 2025-02-01 --until 2025-01-01 "$data_repo"
 
-# Remote mode through a gh mock: body kept, merges and release commits skipped
-cat > "$data_dir/bin/gh" <<'MOCK_GH'
-#!/usr/bin/env bash
-# Minimal gh mock: `auth status` succeeds; `api <path> [--jq <filter>]` serves fixtures
-[[ "$1" == "auth" ]] && exit 0
-[[ "$1" == "api" ]] || exit 1
-path="$2"; shift 2
-filter="."
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --jq) filter="$2"; shift 2 ;;
-        *) shift ;;
-    esac
-done
-case "$path" in
-    *"/commits"*) jq -r "$filter" "$GH_MOCK_COMMITS" ;;
-    *) printf '%s\n' '{"default_branch":"main"}' | jq -r "$filter" ;;
-esac
-MOCK_GH
-chmod +x "$data_dir/bin/gh"
-cat > "$data_dir/commits.json" <<'FIXTURE'
-[
-  {"sha": "aaaaaaa1111", "parents": [{"sha": "p0"}], "author": {"login": "recaptester"},
-   "commit": {"message": "feat: remote feature\n\nWhy: users asked\twith a tab", "author": {"name": "Recap Tester", "date": "2025-03-02T10:00:00Z"}}},
-  {"sha": "bbbbbbb2222", "parents": [{"sha": "p0"}, {"sha": "p1"}], "author": {"login": "recaptester"},
-   "commit": {"message": "Merge pull request #1 from x/y", "author": {"name": "Recap Tester", "date": "2025-03-03T10:00:00Z"}}},
-  {"sha": "ccccccc3333", "parents": [{"sha": "p0"}], "author": {"login": "semantic-release-bot"},
-   "commit": {"message": "chore(release): 1.2.0", "author": {"name": "semantic-release-bot", "date": "2025-03-04T10:00:00Z"}}}
-]
-FIXTURE
-out=$(PATH="$data_dir/bin:$PATH" GH_MOCK_COMMITS="$data_dir/commits.json" \
+# Remote mode through the gh mock: body kept, merges and release commits skipped
+out=$(PATH="$mock_dir/bin:$PATH" \
     "$GIT_RECAP" -f json -m all -p 2025-03 -u recaptester mock/repo 2>/dev/null)
 assert_eq "remote skips merges and release commits" "aaaaaaa" "$(echo "$out" | jq -r '[.commits[].hash] | join(",")')"
 assert_eq "remote commit carries its body" $'Why: users asked\twith a tab' "$(echo "$out" | jq -r '.commits[0].body')"
 assert_eq "remote commit has no file list" "false" "$(echo "$out" | jq '.commits[0] | has("files")')"
-out=$(PATH="$data_dir/bin:$PATH" GH_MOCK_COMMITS="$data_dir/commits.json" \
+out=$(PATH="$mock_dir/bin:$PATH" \
     "$GIT_RECAP" --team -f json -m all -p 2025-03 mock/repo 2>/dev/null)
 assert_eq "remote team skips bot authors" "recaptester" "$(echo "$out" | jq -r '[.contributors[].user] | join(",")')"
 
@@ -687,6 +727,8 @@ else
     printf '  %s %s\n' "$(_red "FAIL")" "--output creates file with content"
 fi
 rm -f "$tmpfile"
+
+rm -rf "$mock_dir"
 
 # ==============================================================================
 # Results
