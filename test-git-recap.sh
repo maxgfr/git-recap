@@ -658,6 +658,18 @@ assert_eq "stats ignore tabs in subjects" "2025-01-12|2025-01-14" "$(echo "$out"
 out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m commits -u "Recap Tester" "$reg_dir/odd" 2>/dev/null)
 assert_contains "text lists the tabbed subject under its date" "$out" "  fix: indent with tabs"
 
+# Pipes in subjects and author names do not add markdown table columns
+_reg_init "$reg_dir/pipes"
+_reg_commit "$reg_dir/pipes" 2025-01-12 "Pipe|Name" "feat: support a|b syntax"
+out=$(HOME="$reg_home" "$GIT_RECAP" -f markdown -p all -m commits -u "Pipe" "$reg_dir/pipes" 2>/dev/null)
+assert_contains "markdown commit table escapes pipes" "$out" '| feat: support a\|b syntax |'
+out=$(HOME="$reg_home" "$GIT_RECAP" --team -f markdown -p all "$reg_dir/pipes" 2>/dev/null)
+assert_contains "team markdown ranking escapes pipes" "$out" '| 1 | Pipe\|Name | 1 | 100% |'
+assert_contains "team markdown commit table escapes pipes" "$out" '| feat: support a\|b syntax |'
+assert_contains "markdown lists keep the raw subject" "$out" '- feat: support a|b syntax'
+out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m commits -u "Pipe" "$reg_dir/pipes" 2>/dev/null)
+assert_contains "text output keeps pipes as they are" "$out" 'feat: support a|b syntax'
+
 # A subject that looks like an echo option is still printed
 _reg_init "$reg_dir/dash"
 _reg_commit "$reg_dir/dash" 2025-01-12 "Recap Tester" "-n"

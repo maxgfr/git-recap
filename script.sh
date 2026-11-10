@@ -1100,7 +1100,7 @@ format_markdown() {
             echo "$commits" | while IFS=$'\t' read -r hash msg date; do
                 local commit_ref
                 commit_ref=$(_markdown_commit_ref "$hash")
-                echo "| ${date} | ${commit_ref} | ${msg} |"
+                echo "| ${date} | ${commit_ref} | ${msg//|/\\|} |"
             done
             echo ""
         fi
@@ -1379,7 +1379,7 @@ output_team_markdown() {
     echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | while read -r cnt author; do
         local pct
         pct=$(LANG=C LC_ALL=C awk "BEGIN {printf \"%.0f\", ($cnt / $total) * 100}")
-        echo "| ${rank} | ${author} | ${cnt} | ${pct}% |"
+        echo "| ${rank} | ${author//|/\\|} | ${cnt} | ${pct}% |"
         rank=$((rank + 1))
     done
     echo ""
@@ -1439,7 +1439,7 @@ output_team_markdown() {
                 echo "$ac" | while IFS=$'\t' read -r hash msg date; do
                     local commit_ref
                     commit_ref=$(_markdown_commit_ref "$hash")
-                    echo "| ${date} | ${commit_ref} | ${msg} |"
+                    echo "| ${date} | ${commit_ref} | ${msg//|/\\|} |"
                 done
                 echo ""
             fi
