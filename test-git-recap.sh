@@ -648,6 +648,31 @@ assert_eq "stats ignore tabs in subjects" "2025-01-12|2025-01-14" "$(echo "$out"
 out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m commits -u "Recap Tester" "$reg_dir/odd" 2>/dev/null)
 assert_contains "text lists the tabbed subject under its date" "$out" "  fix: indent with tabs"
 
+# Large recaps: JSON is built without putting commit data on a command line
+# (2500 commits is past the 1 MB argument limit on macOS, far past Linux's 128 KB per argument)
+_reg_init "$reg_dir/large"
+LC_ALL=C awk 'BEGIN {
+    body = ""
+    while (length(body) < 400) body = body "Explains at length why the change was needed. "
+    for (i = 1; i <= 2500; i++) {
+        msg = "feat: change number " i "\n\n" body "\n"
+        printf "commit refs/heads/main\nmark :%d\n", i
+        printf "author Recap Tester <recap@example.invalid> %d +0000\n", 1735732800 + i * 3600
+        printf "committer Recap Tester <recap@example.invalid> %d +0000\n", 1735732800 + i * 3600
+        printf "data %d\n%s", length(msg), msg
+        if (i > 1) printf "from :%d\n", i - 1
+        content = "line " i "\n"
+        printf "M 100644 inline file%d.txt\ndata %d\n%s\n", i % 20, length(content), content
+    }
+}' | git -C "$reg_dir/large" fast-import --quiet
+out=$(HOME="$reg_home" "$GIT_RECAP" -f json -p all -u "Recap Tester" "$reg_dir/large" 2>/dev/null)
+assert_eq "large single JSON exits 0" "0" "$?"
+assert_eq "large single JSON lists every commit" "2500" "$(echo "$out" | jq '.commits | length' 2>/dev/null)"
+assert_eq "large single JSON keeps bodies and files" "true" "$(echo "$out" | jq '.commits[0] | (.body | length > 100) and (.files | length == 1)' 2>/dev/null)"
+out=$(HOME="$reg_home" "$GIT_RECAP" --team -f json -p all "$reg_dir/large" 2>/dev/null)
+assert_eq "large team JSON lists every commit" "2500" "$(echo "$out" | jq '.contributors[0].commits | length' 2>/dev/null)"
+assert_eq "large team JSON totals match" "2500|2500" "$(echo "$out" | jq -r '"\(.global_stats.total_commits)|\(.contributors[0].stats.total_commits)"' 2>/dev/null)"
+
 # Team sections for authors whose name has a backslash or looks like a number
 _reg_init "$reg_dir/names"
 _reg_commit "$reg_dir/names" 2025-01-10 'CORP\jsmith' "feat: one"

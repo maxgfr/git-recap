@@ -185,24 +185,59 @@ _collect_local_details() {
         || die "Could not read commit details from $LOCAL_REPO_DIR"
 }
 
-# _commits_json <tsv> → JSON array of commits, enriched with recorded details
-_commits_json() {
-    printf '%s\n' "$1" | jq -R -s --slurpfile d "${DETAILS_FILE:-/dev/null}" '
-        ($d | map({key: .hash, value: del(.hash)}) | from_entries) as $m
-        | split("\n") | map(select(length > 0) | split("\t") as $f
-            | {hash: $f[0], message: $f[1], date: $f[2]} + ($m[$f[0]] // {}))'
-}
+# --- JSON assembly ---
+# The JSON document is built by one jq run that reads the commit rows on stdin
+# and everything else from files (--slurpfile): commit data never goes on a
+# command line, where a large recap would exceed the argument size limit.
 
-# _change_stats_json <tsv> → {lines_added, lines_deleted, files_changed} or null
-_change_stats_json() {
-    printf '%s\n' "$1" | cut -f1 | jq -R -s -c --slurpfile d "${DETAILS_FILE:-/dev/null}" '
-        ($d | map(select(.files != null) | {key: .hash, value: .}) | from_entries) as $m
-        | [split("\n")[] | select(length > 0) | $m[.] | select(. != null)] as $c
+# jq definitions shared by the single-user and team documents.
+#   $d    slurped DETAILS_FILE      $mode    summary|commits|bullets|all
+# shellcheck disable=SC2016  # the $names below are jq variables
+_JQ_RECAP='
+    # stdin (raw, slurped) → array of rows, each an array of fields
+    def rows: split("\n") | map(select(length > 0) | split("\t"));
+
+    # recorded details by commit hash
+    def details: $d | map({key: .hash, value: del(.hash)}) | from_entries;
+
+    # compute_stats fields (see _stats_json) → stats object
+    def stats_object: {
+        total_commits: .[0], active_days: .[5], avg_per_day: .[6], longest_streak: .[8],
+        first_date: .[1], last_date: .[2], busiest_day: .[3], busiest_day_commits: .[4],
+        busiest_weekday: .[7]
+    };
+
+    # rows → {lines_added, lines_deleted, files_changed}, or null without file data
+    def change_stats($m):
+        [.[] | $m[.[0]] | select(. != null and .files != null)] as $c
         | if ($c | length) == 0 then null else {
             lines_added: ([$c[].additions] | add),
             lines_deleted: ([$c[].deletions] | add),
             files_changed: ([$c[].files[].path] | unique | length)
-        } end'
+        } end;
+
+    # object with a stats key → same object, stats extended with change stats
+    def with_change_stats($rows; $m; $key):
+        ($rows | change_stats($m)) as $ch | if $ch then .[$key] += $ch else . end;
+
+    # object → same object plus the bullets and commits the mode asks for
+    def with_content($rows; $m):
+        [$rows[] | .[1] | select(length > 0)] as $bullets
+        | if ($mode == "bullets" or $mode == "all") and ($bullets | length) > 0
+            then . + {bullets: $bullets} else . end
+        | if ($mode == "commits" or $mode == "all") and ($rows | length) > 0
+            then . + {commits: ($rows | map({hash: .[0], message: .[1], date: .[2]} + ($m[.[0]] // {})))}
+            else . end;
+'
+
+# _stats_json <stats> → the compute_stats fields as a JSON array:
+# [total, first_date, last_date, busiest_day, busiest_count, active_days,
+#  avg_per_day, busiest_weekday, longest_streak]
+_stats_json() {
+    local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
+    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$1"
+    printf '[%s,"%s","%s","%s",%s,%s,%s,"%s",%s]\n' "${total:-0}" "$first_date" "$last_date" "$busiest_day" \
+        "${busiest_count:-0}" "${active_days:-0}" "${avg_per_day:-0.0}" "$busiest_weekday" "${longest_streak:-0}"
 }
 
 # --- Noise filtering ---
@@ -1110,76 +1145,34 @@ format_text() {
 
 format_json() {
     local commits="$1"
-    local summary="$2"
     local mode="$3"
-    local bullets="$4"
     local stats="$5"
 
-    local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
-    if [[ -n "$stats" ]]; then
-        IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$stats"
-    else
-        total=0 first_date="" last_date="" busiest_day="" busiest_count=0 active_days=0 avg_per_day="0.0" busiest_weekday="" longest_streak=0
-    fi
-
-    local json
-    json=$(jq -n \
+    # shellcheck disable=SC2016  # the $names below are jq variables
+    printf '%s\n' "$commits" | jq -R -s \
+        --slurpfile d "$DETAILS_FILE" \
+        --arg mode "$mode" \
         --arg repo "$REPO_FULL" \
         --arg repo_name "$REPO_NAME" \
         --arg period "$PERIOD_LABEL" \
         --arg since "$SINCE" \
         --arg until "$UNTIL" \
         --arg user "$USER_NAME" \
-        --argjson total "${total:-0}" \
-        --arg first_date "${first_date:-}" \
-        --arg last_date "${last_date:-}" \
-        --arg busiest_day "${busiest_day:-}" \
-        --argjson busiest_count "${busiest_count:-0}" \
-        --argjson active_days "${active_days:-0}" \
-        --argjson avg_per_day "${avg_per_day:-0.0}" \
-        --arg busiest_weekday "${busiest_weekday:-}" \
-        --argjson longest_streak "${longest_streak:-0}" \
-        '{
+        --argjson stats "$(_stats_json "$stats")" \
+        "$_JQ_RECAP"'
+        rows as $rows | details as $m
+        | {
             repo: $repo,
             repo_name: $repo_name,
             period: $period,
             since: $since,
             until: $until,
             user: $user,
-            stats: {
-                total_commits: $total,
-                active_days: $active_days,
-                avg_per_day: $avg_per_day,
-                longest_streak: $longest_streak,
-                first_date: $first_date,
-                last_date: $last_date,
-                busiest_day: $busiest_day,
-                busiest_day_commits: $busiest_count,
-                busiest_weekday: $busiest_weekday
-            }
-        }')
-
-    if [[ -n "$commits" ]]; then
-        json=$(echo "$json" | jq --argjson ch "$(_change_stats_json "$commits")" 'if $ch then .stats += $ch else . end')
-    fi
-
-    if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$summary" ]]; then
-        json=$(echo "$json" | jq --arg s "$summary" '. + {summary: $s}')
-    fi
-
-    if [[ ("$mode" == "bullets" || "$mode" == "all") && -n "$bullets" ]]; then
-        local bullets_arr
-        bullets_arr=$(echo "$bullets" | jq -R -s 'split("\n") | map(select(length > 0))')
-        json=$(echo "$json" | jq --argjson b "$bullets_arr" '. + {bullets: $b}')
-    fi
-
-    if [[ ("$mode" == "commits" || "$mode" == "all") && -n "$commits" ]]; then
-        local commits_arr
-        commits_arr=$(_commits_json "$commits")
-        json=$(echo "$json" | jq --argjson c "$commits_arr" '. + {commits: $c}')
-    fi
-
-    echo "$json"
+            stats: ($stats | stats_object)
+        }
+        | with_change_stats($rows; $m; "stats")
+        | with_content($rows; $m)' \
+        || die "Could not build the JSON output"
 }
 
 # ==============================================================================
@@ -1383,8 +1376,8 @@ output_team_markdown() {
         # Per-author stats
         local ac_stats
         ac_stats=$(compute_stats "$ac")
-        local a_total a_first a_last a_busiest_day a_busiest_count a_active_days a_avg a_weekday a_streak
-        IFS='|' read -r a_total a_first a_last a_busiest_day a_busiest_count a_active_days a_avg a_weekday a_streak <<< "$ac_stats"
+        local a_total a_busiest_day a_busiest_count a_active_days a_avg a_streak
+        IFS='|' read -r a_total _ _ a_busiest_day a_busiest_count a_active_days a_avg _ a_streak <<< "$ac_stats"
         echo "| Metric | Value |"
         echo "|--------|-------|"
         echo "| Commits | ${a_total} |"
@@ -1445,37 +1438,36 @@ output_team_json() {
         branch_label="$BRANCH"
     fi
 
-    local global_3f
-    global_3f=$(echo "$all_commits" | cut -f1-3)
     local global_stats
-    global_stats=$(compute_stats "$global_3f")
-    local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
-    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$global_stats"
+    global_stats=$(compute_stats "$(echo "$all_commits" | cut -f1-3)")
 
-    local authors
+    # Authors by commit count, and their stats in the same order
+    local authors author
     authors=$(echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | sed -E 's/^ *[0-9]+ //')
-    local num_authors
-    num_authors=$(echo "$authors" | wc -l | tr -d ' ')
+    printf '%s\n' "$authors" | jq -R 'select(length > 0)' > "$WORK_DIR/authors.json" \
+        || die "Could not build the JSON output"
+    while IFS= read -r author; do
+        [[ -z "$author" ]] && continue
+        _stats_json "$(compute_stats "$(_author_commits "$all_commits" "$author")")"
+    done <<< "$authors" > "$WORK_DIR/author_stats.json"
 
-    local json
-    json=$(jq -n \
+    # shellcheck disable=SC2016  # the $names below are jq variables
+    printf '%s\n' "$all_commits" | jq -R -s \
+        --slurpfile d "$DETAILS_FILE" \
+        --slurpfile authors "$WORK_DIR/authors.json" \
+        --slurpfile author_stats "$WORK_DIR/author_stats.json" \
+        --arg mode "$mode" \
         --arg repo "$REPO_FULL" \
         --arg repo_name "$REPO_NAME" \
         --arg period "$PERIOD_LABEL" \
         --arg since "$SINCE" \
         --arg until "$UNTIL" \
         --arg branch "$branch_label" \
-        --argjson total "${total:-0}" \
-        --argjson num_authors "$num_authors" \
-        --argjson active_days "${active_days:-0}" \
-        --argjson avg_per_day "${avg_per_day:-0.0}" \
-        --argjson longest_streak "${longest_streak:-0}" \
-        --arg first_date "${first_date:-}" \
-        --arg last_date "${last_date:-}" \
-        --arg busiest_day "${busiest_day:-}" \
-        --argjson busiest_count "${busiest_count:-0}" \
-        --arg busiest_weekday "${busiest_weekday:-}" \
-        '{
+        --argjson stats "$(_stats_json "$global_stats")" \
+        "$_JQ_RECAP"'
+        rows as $rows | details as $m
+        | (reduce $rows[] as $r ({}; .[$r[3]] += [$r[0:3]])) as $by_author
+        | {
             repo: $repo,
             repo_name: $repo_name,
             period: $period,
@@ -1483,85 +1475,19 @@ output_team_json() {
             until: $until,
             branch: $branch,
             team: true,
-            global_stats: {
-                total_commits: $total,
-                contributors: $num_authors,
-                active_days: $active_days,
-                avg_per_day: $avg_per_day,
-                longest_streak: $longest_streak,
-                first_date: $first_date,
-                last_date: $last_date,
-                busiest_day: $busiest_day,
-                busiest_day_commits: $busiest_count,
-                busiest_weekday: $busiest_weekday
-            },
-            contributors: []
-        }')
-    json=$(echo "$json" | jq --argjson ch "$(_change_stats_json "$global_3f")" 'if $ch then .global_stats += $ch else . end')
-
-    while IFS= read -r author; do
-        [[ -z "$author" ]] && continue
-        local ac
-        ac=$(_author_commits "$all_commits" "$author")
-        local ac_stats
-        ac_stats=$(compute_stats "$ac")
-        local a_total a_first a_last a_busiest_day a_busiest_count a_active_days a_avg a_weekday a_streak
-        IFS='|' read -r a_total a_first a_last a_busiest_day a_busiest_count a_active_days a_avg a_weekday a_streak <<< "$ac_stats"
-
-        # Raw content (summaries are written by the git-recap agent skill)
-        local ac_summary="" ac_bullets=""
-        USER_NAME="$author"
-        ac_bullets=$(raw_bullets "$ac")
-
-        local contributor_json
-        contributor_json=$(jq -n \
-            --arg user "$author" \
-            --argjson total "${a_total:-0}" \
-            --argjson active_days "${a_active_days:-0}" \
-            --argjson avg_per_day "${a_avg:-0.0}" \
-            --argjson longest_streak "${a_streak:-0}" \
-            --arg first_date "${a_first:-}" \
-            --arg last_date "${a_last:-}" \
-            --arg busiest_day "${a_busiest_day:-}" \
-            --argjson busiest_count "${a_busiest_count:-0}" \
-            --arg busiest_weekday "${a_weekday:-}" \
-            '{
-                user: $user,
-                stats: {
-                    total_commits: $total,
-                    active_days: $active_days,
-                    avg_per_day: $avg_per_day,
-                    longest_streak: $longest_streak,
-                    first_date: $first_date,
-                    last_date: $last_date,
-                    busiest_day: $busiest_day,
-                    busiest_day_commits: $busiest_count,
-                    busiest_weekday: $busiest_weekday
-                }
-            }')
-
-        contributor_json=$(echo "$contributor_json" | jq --argjson ch "$(_change_stats_json "$ac")" 'if $ch then .stats += $ch else . end')
-
-        if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$ac_summary" ]]; then
-            contributor_json=$(echo "$contributor_json" | jq --arg s "$ac_summary" '. + {summary: $s}')
-        fi
-
-        if [[ ("$mode" == "bullets" || "$mode" == "all") && -n "$ac_bullets" ]]; then
-            local bullets_arr
-            bullets_arr=$(echo "$ac_bullets" | jq -R -s 'split("\n") | map(select(length > 0))')
-            contributor_json=$(echo "$contributor_json" | jq --argjson b "$bullets_arr" '. + {bullets: $b}')
-        fi
-
-        if [[ ("$mode" == "commits" || "$mode" == "all") && -n "$ac" ]]; then
-            local commits_arr
-            commits_arr=$(_commits_json "$ac")
-            contributor_json=$(echo "$contributor_json" | jq --argjson c "$commits_arr" '. + {commits: $c}')
-        fi
-
-        json=$(echo "$json" | jq --argjson c "$contributor_json" '.contributors += [$c]')
-    done <<< "$authors"
-
-    echo "$json"
+            global_stats: ($stats | stats_object | to_entries
+                | .[0:1] + [{key: "contributors", value: ($authors | length)}] + .[1:]
+                | from_entries),
+            contributors: [
+                range(0; $authors | length) as $i
+                | ($by_author[$authors[$i]] // []) as $own
+                | {user: $authors[$i], stats: ($author_stats[$i] | stats_object)}
+                | with_change_stats($own; $m; "stats")
+                | with_content($own; $m)
+            ]
+        }
+        | with_change_stats($rows; $m; "global_stats")' \
+        || die "Could not build the JSON output"
 }
 
 output_team() {
