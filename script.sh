@@ -146,7 +146,7 @@ _split_details() {
 # _collect_local_details <git log args...> : records body + numstat per commit
 _collect_local_details() {
     [[ -n "$DETAILS_FILE" ]] || return 0
-    git -C "$LOCAL_REPO_DIR" log "$@" --numstat --format='%x1e%h%x1f%b%x1f' 2>/dev/null | jq -R -s -c '
+    git -C "$LOCAL_REPO_DIR" -c core.quotePath=false log "$@" --numstat --format='%x1e%h%x1f%b%x1f' -- | jq -R -s -c '
         split("\u001e") | .[1:][] | split("\u001f") as $p
         | {
             hash: $p[0],
@@ -155,7 +155,8 @@ _collect_local_details() {
                 | {path: (.[2:] | join("\t")), additions: (.[0] | tonumber? // 0), deletions: (.[1] | tonumber? // 0)}]
         }
         | .additions = ([.files[].additions] | add // 0)
-        | .deletions = ([.files[].deletions] | add // 0)' >> "$DETAILS_FILE" 2>/dev/null || true
+        | .deletions = ([.files[].deletions] | add // 0)' >> "$DETAILS_FILE" \
+        || die "Could not read commit details from $LOCAL_REPO_DIR"
 }
 
 # _commits_json <tsv> → JSON array of commits, enriched with recorded details
@@ -374,6 +375,9 @@ validate_args() {
         text|markdown|json) ;;
         *) die "Invalid format: $format (expected: text, markdown, json)" ;;
     esac
+
+    # A leading dash would be read as an option by git log
+    [[ "$ARG_BRANCH" != -* ]] || die "Invalid branch name: $ARG_BRANCH"
 
     local d
     for d in "$ARG_SINCE" "$ARG_UNTIL"; do
@@ -618,6 +622,11 @@ resolve_repo() {
     info "Repo: $REPO_FULL (using user: $USER_NAME)"
 }
 
+# _local_ref_exists <ref> : true when <ref> names a commit in the local repo
+_local_ref_exists() {
+    git -C "$LOCAL_REPO_DIR" rev-parse --verify --quiet "${1}^{commit}" >/dev/null 2>&1
+}
+
 detect_default_branch() {
     if [[ "$ARG_ALL_BRANCHES" == true ]]; then
         BRANCH="__all__"
@@ -626,14 +635,26 @@ detect_default_branch() {
     fi
 
     if [[ -n "$ARG_BRANCH" ]]; then
+        if [[ "$REPO_MODE" == "local" ]] && ! _local_ref_exists "$ARG_BRANCH"; then
+            die "Branch not found in $REPO_NAME: $ARG_BRANCH"
+        fi
         BRANCH="$ARG_BRANCH"
         info "Branch: $BRANCH"
         return
     fi
 
     if [[ "$REPO_MODE" == "local" ]]; then
-        BRANCH=$(git -C "$LOCAL_REPO_DIR" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's#refs/remotes/origin/##' || true)
-        [[ -z "$BRANCH" ]] && BRANCH=$(git -C "$LOCAL_REPO_DIR" branch --show-current 2>/dev/null || true)
+        # origin's default branch when it exists here (as a local branch, else
+        # as origin/<branch>), otherwise the current branch
+        local default
+        default=$(git -C "$LOCAL_REPO_DIR" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's#refs/remotes/origin/##' || true)
+        if [[ -n "$default" ]] && _local_ref_exists "refs/heads/$default"; then
+            BRANCH="$default"
+        elif [[ -n "$default" ]] && _local_ref_exists "refs/remotes/origin/$default"; then
+            BRANCH="origin/$default"
+        else
+            BRANCH=$(git -C "$LOCAL_REPO_DIR" branch --show-current 2>/dev/null || true)
+        fi
         [[ -z "$BRANCH" ]] && BRANCH="HEAD"
     else
         BRANCH=$(gh api "repos/${REPO_FULL}" --jq '.default_branch' 2>/dev/null || echo "main")
@@ -689,20 +710,27 @@ _commits_query() {
 
 _fetch_local() {
     local mode="$1"
-    local git_args=()
+    # --no-show-signature: log.showSignature would mix gpg output into the rows
+    local git_args=(--no-show-signature)
     if [[ "$ARG_ALL_BRANCHES" == true ]]; then
-        git_args+=(--all)
+        # Not --all: that also walks refs/stash and refs/notes
+        git_args+=(--branches --remotes --tags)
     else
+        # A repository without any commit has nothing to list
+        _local_ref_exists "$BRANCH" || return 0
         git_args+=("$BRANCH")
     fi
-    if [[ "$mode" == "team" ]]; then
-        git_args+=(--format='%h%x09%s%x09%as%x09%aN' --no-merges)
-    else
-        git_args+=(--author="$USER_NAME" --format='%h%x09%s%x09%as' --no-merges)
+    local row_format='%h%x09%s%x09%as%x09%aN'
+    if [[ "$mode" != "team" ]]; then
+        row_format='%h%x09%s%x09%as'
+        git_args+=(--author="$USER_NAME")
     fi
+    git_args+=(--no-merges)
     [[ -n "$SINCE" ]] && git_args+=(--since="$SINCE")
     [[ -n "$UNTIL" ]] && git_args+=(--until="$UNTIL")
-    git -C "$LOCAL_REPO_DIR" log "${git_args[@]}" 2>/dev/null || true
+    # The trailing "--" keeps a branch named like a path from being ambiguous
+    git -C "$LOCAL_REPO_DIR" log "${git_args[@]}" --format="$row_format" -- \
+        || die "git log failed in $LOCAL_REPO_DIR"
     _collect_local_details "${git_args[@]}"
 }
 

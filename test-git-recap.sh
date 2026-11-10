@@ -604,6 +604,56 @@ err=$(HOME="$reg_home" "$GIT_RECAP" -p 2026-13 -u x "$reg_repo" 2>&1 || true)
 assert_contains "invalid month is reported" "$err" "Invalid period: 2026-13"
 assert_not_contains "invalid period fails before the repo is resolved" "$err" "Local repo"
 
+# Local branches: unknown or option-like names fail instead of "No commits found"
+assert_exit "unknown local branch exits 1" 1 env HOME="$reg_home" "$GIT_RECAP" -b does-not-exist -p all -u "Recap Tester" "$reg_repo"
+err=$(HOME="$reg_home" "$GIT_RECAP" -b does-not-exist -p all -u "Recap Tester" "$reg_repo" 2>&1 || true)
+assert_contains "unknown local branch is reported" "$err" "Branch not found"
+assert_exit "branch starting with a dash exits 1" 1 env HOME="$reg_home" "$GIT_RECAP" -b -1 -p all -u "Recap Tester" "$reg_repo"
+assert_exit "option-like branch exits 1" 1 env HOME="$reg_home" "$GIT_RECAP" -b "--output=$reg_dir/pwned" -p all -u "Recap Tester" "$reg_repo"
+assert_eq "option-like branch never reaches git" "no" "$([[ -e "$reg_dir/pwned" ]] && echo yes || echo no)"
+
+# A branch named like a path is not ambiguous
+mkdir -p "$reg_repo/docs"
+git -C "$reg_repo" branch docs
+out=$(HOME="$reg_home" "$GIT_RECAP" -b docs -p all -m commits -u "Recap Tester" "$reg_repo" 2>/dev/null)
+assert_contains "branch named like a directory is read" "$out" "feat: first"
+rmdir "$reg_repo/docs"
+git -C "$reg_repo" branch -q -D docs
+
+# origin's default branch without a local copy falls back to origin/<branch>
+git -C "$reg_repo" branch dev
+git clone -q --branch dev "$reg_repo" "$reg_dir/clone" 2>/dev/null
+out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m commits -u "Recap Tester" "$reg_dir/clone" 2>&1)
+assert_contains "default branch without local copy uses origin/<branch>" "$out" "Branch: origin/main"
+assert_contains "default branch without local copy returns commits" "$out" "feat: first"
+git -C "$reg_repo" branch -q -D dev
+
+# A repository without commits is an empty recap, not an error
+_reg_init "$reg_dir/empty"
+assert_exit "repository without commits exits 0" 0 env HOME="$reg_home" "$GIT_RECAP" -p all -u "Recap Tester" "$reg_dir/empty"
+out=$(HOME="$reg_home" "$GIT_RECAP" -p all -u "Recap Tester" "$reg_dir/empty" 2>/dev/null)
+assert_contains "repository without commits reports none" "$out" "No commits found"
+
+# --all-branches walks branches, not the stash
+_reg_init "$reg_dir/stash"
+printf 'one\n' > "$reg_dir/stash/tracked.txt"
+git -C "$reg_dir/stash" add tracked.txt
+git -C "$reg_dir/stash" commit -q -m "feat: tracked file"
+printf 'two\n' >> "$reg_dir/stash/tracked.txt"
+printf 'new\n' > "$reg_dir/stash/untracked.txt"
+git -C "$reg_dir/stash" stash push -q -u -m "wip"
+out=$(HOME="$reg_home" "$GIT_RECAP" --all-branches -p all -m commits -u "Recap Tester" "$reg_dir/stash" 2>/dev/null)
+assert_contains "--all-branches lists branch commits" "$out" "feat: tracked file"
+assert_not_contains "--all-branches skips stash index commits" "$out" "index on main"
+assert_not_contains "--all-branches skips stash untracked commits" "$out" "untracked files on main"
+
+# Changed files keep non-ASCII names readable
+printf 'x\n' > "$reg_dir/stash/数据.txt"
+git -C "$reg_dir/stash" add .
+git -C "$reg_dir/stash" commit -q -m "feat: unicode path"
+out=$(HOME="$reg_home" "$GIT_RECAP" -f json -p all -u "Recap Tester" "$reg_dir/stash" 2>/dev/null)
+assert_eq "non-ASCII file names are not C-quoted" "数据.txt" "$(echo "$out" | jq -r '.commits[0].files[0].path')"
+
 rm -rf "$reg_dir"
 
 echo ""
