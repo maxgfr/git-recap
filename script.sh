@@ -674,217 +674,129 @@ check_dependencies() {
 # Fetch commits
 # ==============================================================================
 
-# Fetch commits from all branches via gh api, deduplicate by hash
-# Args: $1 = extra query params (e.g. "author=foo")
-# Returns: hash\tmessage\tdate (3 fields)
-_fetch_all_branches_gh() {
-    local extra_params="${1:-}"
-    local branches
-    branches=$(gh api "repos/${REPO_FULL}/branches" --paginate --jq '.[].name' 2>/dev/null) || true
-    [[ -z "$branches" ]] && return
+# Commits travel as TSV: hash, subject, date, plus the author in team mode.
+# Every fetcher takes <mode> ("team" or "") and <fields> (3 or 4).
 
-    local all_commits="" seen_hashes=""
-    while IFS= read -r branch_name; do
-        [[ -z "$branch_name" ]] && continue
-        local api_url="repos/${REPO_FULL}/commits?sha=${branch_name}&per_page=100"
-        [[ -n "$extra_params" ]] && api_url+="&${extra_params}"
-        [[ -n "$SINCE" ]] && api_url+="&since=${SINCE}Z"
-        [[ -n "$UNTIL" ]] && api_url+="&until=${UNTIL}Z"
-        local branch_commits
-        branch_commits=$(gh api "$api_url" --paginate \
-            --jq "$(_gh_commit_jq)" 2>/dev/null | _split_details 3 || true)
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            local hash="${line%%	*}"
-            if [[ ":${seen_hashes}:" != *":${hash}:"* ]]; then
-                seen_hashes="${seen_hashes}:${hash}"
-                if [[ -n "$all_commits" ]]; then
-                    all_commits="${all_commits}"$'\n'"${line}"
-                else
-                    all_commits="$line"
-                fi
-            fi
-        done <<< "$branch_commits"
-    done <<< "$branches"
-    echo "$all_commits"
+# _commits_query <branch> <mode> → query string for the GitHub commits endpoint
+_commits_query() {
+    local query="sha=${1}"
+    [[ "$2" == "team" ]] || query+="&author=${USER_NAME}"
+    query+="&per_page=100"
+    [[ -n "$SINCE" ]] && query+="&since=${SINCE}Z"
+    [[ -n "$UNTIL" ]] && query+="&until=${UNTIL}Z"
+    printf '%s' "$query"
 }
 
-# Fetch all commits from all branches for team mode (4 fields: hash\tmsg\tdate\tauthor)
-_fetch_all_branches_gh_team() {
-    local branches
-    branches=$(gh api "repos/${REPO_FULL}/branches" --paginate --jq '.[].name' 2>/dev/null) || true
-    [[ -z "$branches" ]] && return
-
-    local all_commits="" seen_hashes=""
-    while IFS= read -r branch_name; do
-        [[ -z "$branch_name" ]] && continue
-        local api_url="repos/${REPO_FULL}/commits?sha=${branch_name}&per_page=100"
-        [[ -n "$SINCE" ]] && api_url+="&since=${SINCE}Z"
-        [[ -n "$UNTIL" ]] && api_url+="&until=${UNTIL}Z"
-        local branch_commits
-        branch_commits=$(gh api "$api_url" --paginate \
-            --jq "$(_gh_commit_jq team)" 2>/dev/null | _split_details 4 || true)
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            local hash="${line%%	*}"
-            if [[ ":${seen_hashes}:" != *":${hash}:"* ]]; then
-                seen_hashes="${seen_hashes}:${hash}"
-                if [[ -n "$all_commits" ]]; then
-                    all_commits="${all_commits}"$'\n'"${line}"
-                else
-                    all_commits="$line"
-                fi
-            fi
-        done <<< "$branch_commits"
-    done <<< "$branches"
-    echo "$all_commits"
-}
-
-fetch_commits() {
-    local commits=""
-
-    if [[ "$REPO_MODE" == "local" ]]; then
-        info "Fetching commits (local)..."
-        local dir="$LOCAL_REPO_DIR"
-        local git_args=()
-        if [[ "$ARG_ALL_BRANCHES" == true ]]; then
-            git_args+=(--all)
-        else
-            git_args+=("$BRANCH")
-        fi
-        git_args+=(--author="$USER_NAME" --format='%h%x09%s%x09%as' --no-merges)
-        [[ -n "$SINCE" ]] && git_args+=(--since="$SINCE")
-        [[ -n "$UNTIL" ]] && git_args+=(--until="$UNTIL")
-        commits=$(git -C "$dir" log "${git_args[@]}" 2>/dev/null || true)
-        _collect_local_details "${git_args[@]}"
-    elif command -v gh &>/dev/null; then
-        info "Fetching commits (gh api)..."
-        if [[ "$ARG_ALL_BRANCHES" == true ]]; then
-            commits=$(_fetch_all_branches_gh "author=${USER_NAME}")
-        else
-            local api_url="repos/${REPO_FULL}/commits?sha=${BRANCH}&author=${USER_NAME}&per_page=100"
-            [[ -n "$SINCE" ]] && api_url+="&since=${SINCE}Z"
-            [[ -n "$UNTIL" ]] && api_url+="&until=${UNTIL}Z"
-            local api_err=""
-            commits=$(gh api "$api_url" --paginate \
-                --jq "$(_gh_commit_jq)" 2>&1) || api_err="$commits"
-            if [[ -n "$api_err" ]]; then
-                case "$api_err" in
-                    *"404"*) die "Repository not found: ${REPO_FULL}" ;;
-                    *"403"*) die "Access denied (rate limit or permissions): ${REPO_FULL}" ;;
-                    *) die "API error: ${api_err}" ;;
-                esac
-            fi
-            commits=$(printf '%s\n' "$commits" | _split_details 3)
-        fi
-    elif command -v curl &>/dev/null; then
-        info "Fetching commits (curl)..."
-        command -v jq &>/dev/null || die "jq is required when using curl fallback"
-        local url="https://api.github.com/repos/${REPO_FULL}/commits?sha=${BRANCH}&author=${USER_NAME}&per_page=100"
-        [[ -n "$SINCE" ]] && url+="&since=${SINCE}Z"
-        [[ -n "$UNTIL" ]] && url+="&until=${UNTIL}Z"
-        local tmpheaders
-        tmpheaders=$(mktemp)
-        while [[ -n "$url" ]]; do
-            local page_json
-            page_json=$(curl -s -D "$tmpheaders" "$url")
-            local page_commits
-            page_commits=$(echo "$page_json" | jq -r "$(_gh_commit_jq)" 2>/dev/null | _split_details 3 || true)
-            if [[ -n "$page_commits" ]]; then
-                if [[ -n "$commits" ]]; then
-                    commits="${commits}"$'\n'"${page_commits}"
-                else
-                    commits="$page_commits"
-                fi
-            fi
-            # Parse Link header for next page
-            local next_url
-            next_url=$(sed -n 's/.*<\([^>]*\)>; *rel="next".*/\1/p' "$tmpheaders" | tr -d '\r') || true
-            url="$next_url"
-        done
-        rm -f "$tmpheaders"
+_fetch_local() {
+    local mode="$1"
+    local git_args=()
+    if [[ "$ARG_ALL_BRANCHES" == true ]]; then
+        git_args+=(--all)
     else
-        die "No method available to fetch commits"
+        git_args+=("$BRANCH")
     fi
-
-    commits=$(printf '%s\n' "$commits" | filter_noise)
-
-    if [[ -z "$commits" ]]; then
-        warn "No commits found for $USER_NAME on $REPO_FULL ($PERIOD_LABEL)"
-        echo ""
-        return
-    fi
-
-    local count
-    count=$(echo "$commits" | wc -l | tr -d ' ')
-    info "Found $count commit(s)"
-
-    echo "$commits"
-}
-
-# Returns: hash\tmessage\tdate\tauthor (4 fields)
-fetch_team_commits() {
-    local commits=""
-
-    if [[ "$REPO_MODE" == "local" ]]; then
-        info "Fetching all commits (local, team mode)..."
-        local dir="$LOCAL_REPO_DIR"
-        local git_args=()
-        if [[ "$ARG_ALL_BRANCHES" == true ]]; then
-            git_args+=(--all)
-        else
-            git_args+=("$BRANCH")
-        fi
+    if [[ "$mode" == "team" ]]; then
         git_args+=(--format='%h%x09%s%x09%as%x09%aN' --no-merges)
-        [[ -n "$SINCE" ]] && git_args+=(--since="$SINCE")
-        [[ -n "$UNTIL" ]] && git_args+=(--until="$UNTIL")
-        commits=$(git -C "$dir" log "${git_args[@]}" 2>/dev/null || true)
-        _collect_local_details "${git_args[@]}"
-    elif command -v gh &>/dev/null; then
-        info "Fetching all commits (gh api, team mode)..."
-        if [[ "$ARG_ALL_BRANCHES" == true ]]; then
-            commits=$(_fetch_all_branches_gh_team)
-        else
-            local api_url="repos/${REPO_FULL}/commits?sha=${BRANCH}&per_page=100"
-            [[ -n "$SINCE" ]] && api_url+="&since=${SINCE}Z"
-            [[ -n "$UNTIL" ]] && api_url+="&until=${UNTIL}Z"
-            local api_err=""
-            commits=$(gh api "$api_url" --paginate \
-                --jq "$(_gh_commit_jq team)" 2>&1) || api_err="$commits"
-            if [[ -n "$api_err" ]]; then
-                case "$api_err" in
-                    *"404"*) die "Repository not found: ${REPO_FULL}" ;;
-                    *"403"*) die "Access denied (rate limit or permissions): ${REPO_FULL}" ;;
-                    *) die "API error: ${api_err}" ;;
-                esac
-            fi
-            commits=$(printf '%s\n' "$commits" | _split_details 4)
-        fi
-    elif command -v curl &>/dev/null; then
-        info "Fetching all commits (curl, team mode)..."
-        command -v jq &>/dev/null || die "jq is required when using curl fallback"
-        local url="https://api.github.com/repos/${REPO_FULL}/commits?sha=${BRANCH}&per_page=100"
-        [[ -n "$SINCE" ]] && url+="&since=${SINCE}Z"
-        [[ -n "$UNTIL" ]] && url+="&until=${UNTIL}Z"
-        local tmpheaders
-        tmpheaders=$(mktemp)
-        while [[ -n "$url" ]]; do
-            local page_json
-            page_json=$(curl -s -D "$tmpheaders" "$url")
-            local page_commits
-            page_commits=$(echo "$page_json" | jq -r "$(_gh_commit_jq team)" 2>/dev/null | _split_details 4 || true)
-            if [[ -n "$page_commits" ]]; then
-                if [[ -n "$commits" ]]; then
-                    commits="${commits}"$'\n'"${page_commits}"
+    else
+        git_args+=(--author="$USER_NAME" --format='%h%x09%s%x09%as' --no-merges)
+    fi
+    [[ -n "$SINCE" ]] && git_args+=(--since="$SINCE")
+    [[ -n "$UNTIL" ]] && git_args+=(--until="$UNTIL")
+    git -C "$LOCAL_REPO_DIR" log "${git_args[@]}" 2>/dev/null || true
+    _collect_local_details "${git_args[@]}"
+}
+
+# Fetch commits from all branches via gh api, deduplicate by hash
+_fetch_gh_all_branches() {
+    local mode="$1" fields="$2"
+    local branches
+    branches=$(gh api "repos/${REPO_FULL}/branches" --paginate --jq '.[].name' 2>/dev/null) || true
+    [[ -z "$branches" ]] && return
+
+    local all_commits="" seen_hashes="" branch_name branch_commits line hash
+    while IFS= read -r branch_name; do
+        [[ -z "$branch_name" ]] && continue
+        branch_commits=$(gh api "repos/${REPO_FULL}/commits?$(_commits_query "$branch_name" "$mode")" --paginate \
+            --jq "$(_gh_commit_jq "$mode")" 2>/dev/null | _split_details "$fields" || true)
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            hash="${line%%	*}"
+            if [[ ":${seen_hashes}:" != *":${hash}:"* ]]; then
+                seen_hashes="${seen_hashes}:${hash}"
+                if [[ -n "$all_commits" ]]; then
+                    all_commits="${all_commits}"$'\n'"${line}"
                 else
-                    commits="$page_commits"
+                    all_commits="$line"
                 fi
             fi
-            local next_url
-            next_url=$(sed -n 's/.*<\([^>]*\)>; *rel="next".*/\1/p' "$tmpheaders" | tr -d '\r') || true
-            url="$next_url"
-        done
-        rm -f "$tmpheaders"
+        done <<< "$branch_commits"
+    done <<< "$branches"
+    echo "$all_commits"
+}
+
+_fetch_gh() {
+    local mode="$1" fields="$2"
+    if [[ "$ARG_ALL_BRANCHES" == true ]]; then
+        _fetch_gh_all_branches "$mode" "$fields"
+        return
+    fi
+
+    local commits api_err=""
+    commits=$(gh api "repos/${REPO_FULL}/commits?$(_commits_query "$BRANCH" "$mode")" --paginate \
+        --jq "$(_gh_commit_jq "$mode")" 2>&1) || api_err="$commits"
+    if [[ -n "$api_err" ]]; then
+        case "$api_err" in
+            *"404"*) die "Repository not found: ${REPO_FULL}" ;;
+            *"403"*) die "Access denied (rate limit or permissions): ${REPO_FULL}" ;;
+            *) die "API error: ${api_err}" ;;
+        esac
+    fi
+    printf '%s\n' "$commits" | _split_details "$fields"
+}
+
+_fetch_curl() {
+    local mode="$1" fields="$2"
+    command -v jq &>/dev/null || die "jq is required when using curl fallback"
+    local url
+    url="https://api.github.com/repos/${REPO_FULL}/commits?$(_commits_query "$BRANCH" "$mode")"
+    local tmpheaders commits="" page_json page_commits next_url
+    tmpheaders=$(mktemp)
+    while [[ -n "$url" ]]; do
+        page_json=$(curl -s -D "$tmpheaders" "$url")
+        page_commits=$(echo "$page_json" | jq -r "$(_gh_commit_jq "$mode")" 2>/dev/null | _split_details "$fields" || true)
+        if [[ -n "$page_commits" ]]; then
+            if [[ -n "$commits" ]]; then
+                commits="${commits}"$'\n'"${page_commits}"
+            else
+                commits="$page_commits"
+            fi
+        fi
+        # Parse Link header for next page
+        next_url=$(sed -n 's/.*<\([^>]*\)>; *rel="next".*/\1/p' "$tmpheaders" | tr -d '\r') || true
+        url="$next_url"
+    done
+    rm -f "$tmpheaders"
+    printf '%s\n' "$commits"
+}
+
+# fetch_commits [team] → filtered commit TSV (empty line when there is none)
+fetch_commits() {
+    local mode="${1:-}" fields=3 what="commits" suffix=""
+    if [[ "$mode" == "team" ]]; then
+        fields=4 what="all commits" suffix=", team mode"
+    fi
+
+    # Errors inside $(...) do not stop the caller: propagate them explicitly
+    local commits=""
+    if [[ "$REPO_MODE" == "local" ]]; then
+        info "Fetching ${what} (local${suffix})..."
+        commits=$(_fetch_local "$mode") || exit 1
+    elif command -v gh &>/dev/null; then
+        info "Fetching ${what} (gh api${suffix})..."
+        commits=$(_fetch_gh "$mode" "$fields") || exit 1
+    elif command -v curl &>/dev/null; then
+        info "Fetching ${what} (curl${suffix})..."
+        commits=$(_fetch_curl "$mode" "$fields") || exit 1
     else
         die "No method available to fetch commits"
     fi
@@ -892,16 +804,24 @@ fetch_team_commits() {
     commits=$(printf '%s\n' "$commits" | filter_noise)
 
     if [[ -z "$commits" ]]; then
-        warn "No commits found on $REPO_FULL ($PERIOD_LABEL)"
+        if [[ "$mode" == "team" ]]; then
+            warn "No commits found on $REPO_FULL ($PERIOD_LABEL)"
+        else
+            warn "No commits found for $USER_NAME on $REPO_FULL ($PERIOD_LABEL)"
+        fi
         echo ""
         return
     fi
 
     local count
     count=$(echo "$commits" | wc -l | tr -d ' ')
-    local author_count
-    author_count=$(echo "$commits" | cut -f4 | sort -u | wc -l | tr -d ' ')
-    info "Found $count commit(s) from $author_count contributor(s)"
+    if [[ "$mode" == "team" ]]; then
+        local author_count
+        author_count=$(echo "$commits" | cut -f4 | sort -u | wc -l | tr -d ' ')
+        info "Found $count commit(s) from $author_count contributor(s)"
+    else
+        info "Found $count commit(s)"
+    fi
 
     echo "$commits"
 }
@@ -1645,7 +1565,7 @@ main() {
     # === Team mode ===
     if [[ "$ARG_TEAM" == true ]]; then
         local all_commits
-        all_commits=$(fetch_team_commits)
+        all_commits=$(fetch_commits team)
 
         if [[ -z "$all_commits" ]]; then
             local format="${ARG_FORMAT:-$DEFAULT_FORMAT}"
