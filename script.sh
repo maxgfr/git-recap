@@ -5,7 +5,7 @@ set -euo pipefail
 # git-recap — Commit recap data generator (AI writing lives in the agent skill)
 # ==============================================================================
 
-VERSION="1.7.0"
+VERSION="2.0.0"
 CONFIG_FILE="$HOME/.git-recaprc"
 
 # Defaults
