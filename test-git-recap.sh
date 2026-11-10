@@ -658,6 +658,14 @@ assert_eq "stats ignore tabs in subjects" "2025-01-12|2025-01-14" "$(echo "$out"
 out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m commits -u "Recap Tester" "$reg_dir/odd" 2>/dev/null)
 assert_contains "text lists the tabbed subject under its date" "$out" "  fix: indent with tabs"
 
+# --exclude-author takes a literal name as well as a glob, in any case
+out=$(HOME="$reg_home" "$GIT_RECAP" --team --all-commits -f json -p all "$reg_dir/odd" 2>/dev/null)
+assert_eq "--all-commits keeps the bot" "Recap Tester,dependabot[bot]" "$(echo "$out" | jq -r '[.contributors[].user] | sort | join(",")')"
+out=$(HOME="$reg_home" "$GIT_RECAP" --team --all-commits --exclude-author 'Dependabot[bot]' -f json -p all "$reg_dir/odd" 2>/dev/null)
+assert_eq "--exclude-author matches a name with brackets literally" "Recap Tester" "$(echo "$out" | jq -r '[.contributors[].user] | join(",")')"
+out=$(HOME="$reg_home" "$GIT_RECAP" --team --all-commits --exclude-author 'RECAP*' -f json -p all "$reg_dir/odd" 2>/dev/null)
+assert_eq "--exclude-author still matches globs case-insensitively" "dependabot[bot]" "$(echo "$out" | jq -r '[.contributors[].user] | join(",")')"
+
 # Large recaps: JSON is built without putting commit data on a command line
 # (2500 commits is past the 1 MB argument limit on macOS, far past Linux's 128 KB per argument)
 _reg_init "$reg_dir/large"

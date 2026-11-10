@@ -259,8 +259,9 @@ _is_excluded_author() {
     while IFS= read -r pattern; do
         [[ -z "$pattern" ]] && continue
         lower_pattern=$(printf '%s' "$pattern" | tr '[:upper:]' '[:lower:]')
+        # A literal name first ("dependabot[bot]" is not a character class), then a glob
         # shellcheck disable=SC2053  # glob matching is intended
-        [[ "$lower_author" == $lower_pattern ]] && return 0
+        [[ "$lower_author" == "$lower_pattern" || "$lower_author" == $lower_pattern ]] && return 0
     done <<< "$ARG_EXCLUDE_AUTHORS"
     return 1
 }
