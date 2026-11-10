@@ -24,6 +24,10 @@ ARG_REPO=""
 ARG_INIT=false
 ARG_TEAM=false
 ARG_ALL_BRANCHES=false
+ARG_SINCE=""
+ARG_UNTIL=""
+ARG_EXCLUDE_AUTHORS=""  # newline-separated glob patterns
+ARG_ALL_COMMITS=false
 
 # Resolved values
 USER_NAME=""
@@ -36,6 +40,7 @@ BRANCH=""
 SINCE=""
 UNTIL=""
 PERIOD_LABEL=""
+DETAILS_FILE=""  # JSON lines {hash, body, files?, additions?, deletions?} (json format only)
 
 # ==============================================================================
 # Helpers
@@ -48,6 +53,13 @@ info()  { _color "34"; printf ":: %s\n" "$*" >&2; _reset; }
 warn()  { _color "33"; printf "!! %s\n" "$*" >&2; _reset; }
 error() { _color "31"; printf "!! %s\n" "$*" >&2; _reset; }
 die()   { error "$@"; exit 1; }
+
+cleanup() {
+    if [[ -n "$DETAILS_FILE" ]]; then
+        rm -f "$DETAILS_FILE"
+    fi
+}
+trap cleanup EXIT
 
 # --- Portable date ---
 
@@ -137,6 +149,118 @@ raw_bullets() {
     printf '%s\n' "$1" | cut -f2
 }
 
+# --- Commit details (body, changed files) for JSON output ---
+
+# jq program turning a GitHub API commit list into TSV, merges excluded.
+# Fields: hash, subject, date[, author], body (body is @tsv-escaped)
+_gh_commit_jq() {
+    local fields='.sha[0:7], (.commit.message | split("\n")[0]), (.commit.author.date | split("T")[0])'
+    [[ "${1:-}" == "team" ]] && fields+=', (.author.login // .commit.author.name)'
+    printf '.[] | select((.parents | length) < 2) | [%s, (.commit.message | split("\\n")[1:] | join("\\n"))] | @tsv' "$fields"
+}
+
+# _split_details <n> : stdin = TSV whose field n+1 is the escaped body.
+# Records bodies in DETAILS_FILE and prints the first n fields.
+_split_details() {
+    local n="$1" raw
+    raw=$(cat)
+    [[ -z "$raw" ]] && return 0
+    if [[ -n "$DETAILS_FILE" ]]; then
+        printf '%s\n' "$raw" | jq -R -c --argjson n "$n" '
+            split("\t") | {
+                hash: .[0],
+                body: ((.[$n] // "")
+                    | gsub("\\\\(?<c>[tnr\\\\])"; if .c == "t" then "\t" elif .c == "n" then "\n" elif .c == "r" then "" else "\\" end)
+                    | sub("^\\s+"; "") | sub("\\s+$"; ""))
+            }' >> "$DETAILS_FILE" 2>/dev/null || true
+    fi
+    printf '%s\n' "$raw" | cut -f1-"$n"
+}
+
+# _collect_local_details <git log args...> : records body + numstat per commit
+_collect_local_details() {
+    [[ -n "$DETAILS_FILE" ]] || return 0
+    git -C "$LOCAL_REPO_DIR" log "$@" --numstat --format='%x1e%h%x1f%b%x1f' 2>/dev/null | jq -R -s -c '
+        split("\u001e") | .[1:][] | split("\u001f") as $p
+        | {
+            hash: $p[0],
+            body: ($p[1] | sub("^\\s+"; "") | sub("\\s+$"; "")),
+            files: [($p[2] // "") | split("\n")[] | split("\t") | select(length >= 3)
+                | {path: (.[2:] | join("\t")), additions: (.[0] | tonumber? // 0), deletions: (.[1] | tonumber? // 0)}]
+        }
+        | .additions = ([.files[].additions] | add // 0)
+        | .deletions = ([.files[].deletions] | add // 0)' >> "$DETAILS_FILE" 2>/dev/null || true
+}
+
+# _commits_json <tsv> → JSON array of commits, enriched with recorded details
+_commits_json() {
+    printf '%s\n' "$1" | jq -R -s --slurpfile d "${DETAILS_FILE:-/dev/null}" '
+        ($d | map({key: .hash, value: del(.hash)}) | from_entries) as $m
+        | split("\n") | map(select(length > 0) | split("\t") as $f
+            | {hash: $f[0], message: $f[1], date: $f[2]} + ($m[$f[0]] // {}))'
+}
+
+# _change_stats_json <tsv> → {lines_added, lines_deleted, files_changed} or null
+_change_stats_json() {
+    printf '%s\n' "$1" | cut -f1 | jq -R -s -c --slurpfile d "${DETAILS_FILE:-/dev/null}" '
+        ($d | map(select(.files != null) | {key: .hash, value: .}) | from_entries) as $m
+        | [split("\n")[] | select(length > 0) | $m[.] | select(. != null)] as $c
+        | if ($c | length) == 0 then null else {
+            lines_added: ([$c[].additions] | add),
+            lines_deleted: ([$c[].deletions] | add),
+            files_changed: ([$c[].files[].path] | unique | length)
+        } end'
+}
+
+# --- Noise filtering ---
+
+_is_bot_author() {
+    case "$1" in
+        *\[bot\]|*-bot|*" bot"|*-Bot|*" Bot") return 0 ;;
+    esac
+    return 1
+}
+
+_is_release_commit() {
+    [[ "$1" =~ ^chore\(release\) || "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+_is_excluded_author() {
+    local author="$1" pattern lower_author lower_pattern
+    lower_author=$(printf '%s' "$author" | tr '[:upper:]' '[:lower:]')
+    while IFS= read -r pattern; do
+        [[ -z "$pattern" ]] && continue
+        lower_pattern=$(printf '%s' "$pattern" | tr '[:upper:]' '[:lower:]')
+        # shellcheck disable=SC2053  # glob matching is intended
+        [[ "$lower_author" == $lower_pattern ]] && return 0
+    done <<< "$ARG_EXCLUDE_AUTHORS"
+    return 1
+}
+
+# filter_noise : stdin = commit TSV (author in field 4 when present).
+# Drops bot authors, release commits and --exclude-author matches.
+filter_noise() {
+    local line subject author kept="" skipped=0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        author=""
+        IFS=$'\t' read -r _ subject _ author <<< "$line"
+        if [[ "$ARG_ALL_COMMITS" == false ]] && { _is_release_commit "$subject" || { [[ -n "$author" ]] && _is_bot_author "$author"; }; }; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+        if [[ -n "$author" && -n "$ARG_EXCLUDE_AUTHORS" ]] && _is_excluded_author "$author"; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+        kept+="${line}"$'\n'
+    done
+    if [[ $skipped -gt 0 ]]; then
+        info "Skipped $skipped bot/release/excluded commit(s) (use --all-commits to keep bots and releases)"
+    fi
+    printf '%s' "$kept"
+}
+
 _markdown_commit_ref() {
     local hash="$1"
     if [[ -n "$REPO_WEB_URL" ]]; then
@@ -173,8 +297,13 @@ Usage:
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
   -b, --branch <branch>   Branch (default: auto-detected)
+  --since <YYYY-MM-DD>    Start date (inclusive), instead of -p
+  --until <YYYY-MM-DD>    End date (inclusive), instead of -p
   --team                  Team mode: recap for all contributors grouped by author
   --all-branches          Fetch commits from all branches (not just default/specified)
+  --exclude-author <glob> Skip commits from matching authors in team mode
+                          (case-insensitive, repeatable, e.g. "*bot*")
+  --all-commits           Keep bot authors and release commits (skipped by default)
   --init                  Initialize configuration
   -h, --help              Show this help
   -v, --version           Show version
@@ -203,10 +332,13 @@ Usage:
   git-recap -p 2025 maxgfr/subtool                     # Full year 2025
   git-recap -p 3 maxgfr/subtool                        # Last 3 months
   git-recap -p all maxgfr/subtool                      # All commits ever
+  git-recap --since 2026-01-05 --until 2026-01-16 .    # Custom date range (sprint)
 
   ## Output format (-f) and file output (-o)
   git-recap -f markdown -o recap.md maxgfr/subtool     # Markdown saved to file
   git-recap -f json maxgfr/subtool | jq .              # JSON piped to jq
+                                                       # (includes commit bodies, and
+                                                       # changed files for local repos)
 
   ## Mode selection (-m)
   git-recap -m summary maxgfr/subtool                  # Stats only
@@ -219,6 +351,8 @@ Usage:
   git-recap --team -f markdown -o recap.md maxgfr/subtool  # Team markdown report
   git-recap --team -b develop maxgfr/subtool           # Team recap on develop branch
   git-recap --team --all-branches .                    # All contributors, all branches
+  git-recap --team --exclude-author "jdoe" .           # Team recap without jdoe
+  git-recap --team --all-commits .                     # Keep bots and release commits
 
   ## Repo formats
   git-recap maxgfr/subtool                             # owner/repo
@@ -243,6 +377,11 @@ parse_args() {
             --provider|--model|--lang|--voice)
                 die "$1 was removed in git-recap 2.0: AI writing now happens through the git-recap agent skill (npx skills add maxgfr/git-recap)" ;;
             --no-ai)      shift ;;  # Kept for compatibility: git-recap never calls AI
+            --since)      ARG_SINCE="${2:?Missing value for $1}"; shift 2 ;;
+            --until)      ARG_UNTIL="${2:?Missing value for $1}"; shift 2 ;;
+            --exclude-author)
+                ARG_EXCLUDE_AUTHORS+="${2:?Missing value for $1}"$'\n'; shift 2 ;;
+            --all-commits) ARG_ALL_COMMITS=true; shift ;;
             --team)       ARG_TEAM=true; shift ;;
             --all-branches) ARG_ALL_BRANCHES=true; shift ;;
             --init)       ARG_INIT=true; shift ;;
@@ -269,6 +408,17 @@ validate_args() {
         text|markdown|json) ;;
         *) die "Invalid format: $format (expected: text, markdown, json)" ;;
     esac
+
+    local d
+    for d in "$ARG_SINCE" "$ARG_UNTIL"; do
+        [[ -z "$d" || "$d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "Invalid date: $d (expected: YYYY-MM-DD)"
+    done
+    if [[ -n "$ARG_SINCE" && -n "$ARG_UNTIL" && "$ARG_SINCE" > "$ARG_UNTIL" ]]; then
+        die "--since ($ARG_SINCE) is after --until ($ARG_UNTIL)"
+    fi
+    if [[ -n "$ARG_PERIOD" && ( -n "$ARG_SINCE" || -n "$ARG_UNTIL" ) ]]; then
+        die "Use either -p/--period or --since/--until, not both"
+    fi
 
     if [[ "$ARG_INIT" == false && -z "$ARG_REPO" ]]; then
         die "Missing required argument: <repo>. Use -h for help."
@@ -353,6 +503,14 @@ EOF
 # ==============================================================================
 
 compute_period() {
+    if [[ -n "$ARG_SINCE" || -n "$ARG_UNTIL" ]]; then
+        SINCE="${ARG_SINCE:+${ARG_SINCE}T00:00:00}"
+        UNTIL="${ARG_UNTIL:+${ARG_UNTIL}T23:59:59}"
+        PERIOD_LABEL="${ARG_SINCE:-beginning} → ${ARG_UNTIL:-today}"
+        info "Period: $PERIOD_LABEL"
+        return
+    fi
+
     local period="${ARG_PERIOD:-$DEFAULT_PERIOD}"
 
     case "$period" in
@@ -602,7 +760,7 @@ _fetch_all_branches_gh() {
         [[ -n "$UNTIL" ]] && api_url+="&until=${UNTIL}Z"
         local branch_commits
         branch_commits=$(gh api "$api_url" --paginate \
-            --jq '.[] | [.sha[0:7], (.commit.message | split("\n")[0]), (.commit.author.date | split("T")[0])] | @tsv' 2>/dev/null || true)
+            --jq "$(_gh_commit_jq)" 2>/dev/null | _split_details 3 || true)
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
             local hash="${line%%	*}"
@@ -633,7 +791,7 @@ _fetch_all_branches_gh_team() {
         [[ -n "$UNTIL" ]] && api_url+="&until=${UNTIL}Z"
         local branch_commits
         branch_commits=$(gh api "$api_url" --paginate \
-            --jq '.[] | [.sha[0:7], (.commit.message | split("\n")[0]), (.commit.author.date | split("T")[0]), (.author.login // .commit.author.name)] | @tsv' 2>/dev/null || true)
+            --jq "$(_gh_commit_jq team)" 2>/dev/null | _split_details 4 || true)
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
             local hash="${line%%	*}"
@@ -666,6 +824,7 @@ fetch_commits() {
         [[ -n "$SINCE" ]] && git_args+=(--since="$SINCE")
         [[ -n "$UNTIL" ]] && git_args+=(--until="$UNTIL")
         commits=$(git -C "$dir" log "${git_args[@]}" 2>/dev/null || true)
+        _collect_local_details "${git_args[@]}"
     elif command -v gh &>/dev/null; then
         info "Fetching commits (gh api)..."
         if [[ "$ARG_ALL_BRANCHES" == true ]]; then
@@ -676,7 +835,7 @@ fetch_commits() {
             [[ -n "$UNTIL" ]] && api_url+="&until=${UNTIL}Z"
             local api_err=""
             commits=$(gh api "$api_url" --paginate \
-                --jq '.[] | [.sha[0:7], (.commit.message | split("\n")[0]), (.commit.author.date | split("T")[0])] | @tsv' 2>&1) || api_err="$commits"
+                --jq "$(_gh_commit_jq)" 2>&1) || api_err="$commits"
             if [[ -n "$api_err" ]]; then
                 case "$api_err" in
                     *"404"*) die "Repository not found: ${REPO_FULL}" ;;
@@ -684,6 +843,7 @@ fetch_commits() {
                     *) die "API error: ${api_err}" ;;
                 esac
             fi
+            commits=$(printf '%s\n' "$commits" | _split_details 3)
         fi
     elif command -v curl &>/dev/null; then
         info "Fetching commits (curl)..."
@@ -697,7 +857,7 @@ fetch_commits() {
             local page_json
             page_json=$(curl -s -D "$tmpheaders" "$url")
             local page_commits
-            page_commits=$(echo "$page_json" | jq -r '.[] | [.sha[0:7], (.commit.message | split("\n")[0]), (.commit.author.date | split("T")[0])] | @tsv' 2>/dev/null || true)
+            page_commits=$(echo "$page_json" | jq -r "$(_gh_commit_jq)" 2>/dev/null | _split_details 3 || true)
             if [[ -n "$page_commits" ]]; then
                 if [[ -n "$commits" ]]; then
                     commits="${commits}"$'\n'"${page_commits}"
@@ -714,6 +874,8 @@ fetch_commits() {
     else
         die "No method available to fetch commits"
     fi
+
+    commits=$(printf '%s\n' "$commits" | filter_noise)
 
     if [[ -z "$commits" ]]; then
         warn "No commits found for $USER_NAME on $REPO_FULL ($PERIOD_LABEL)"
@@ -745,6 +907,7 @@ fetch_team_commits() {
         [[ -n "$SINCE" ]] && git_args+=(--since="$SINCE")
         [[ -n "$UNTIL" ]] && git_args+=(--until="$UNTIL")
         commits=$(git -C "$dir" log "${git_args[@]}" 2>/dev/null || true)
+        _collect_local_details "${git_args[@]}"
     elif command -v gh &>/dev/null; then
         info "Fetching all commits (gh api, team mode)..."
         if [[ "$ARG_ALL_BRANCHES" == true ]]; then
@@ -755,7 +918,7 @@ fetch_team_commits() {
             [[ -n "$UNTIL" ]] && api_url+="&until=${UNTIL}Z"
             local api_err=""
             commits=$(gh api "$api_url" --paginate \
-                --jq '.[] | [.sha[0:7], (.commit.message | split("\n")[0]), (.commit.author.date | split("T")[0]), (.author.login // .commit.author.name)] | @tsv' 2>&1) || api_err="$commits"
+                --jq "$(_gh_commit_jq team)" 2>&1) || api_err="$commits"
             if [[ -n "$api_err" ]]; then
                 case "$api_err" in
                     *"404"*) die "Repository not found: ${REPO_FULL}" ;;
@@ -763,6 +926,7 @@ fetch_team_commits() {
                     *) die "API error: ${api_err}" ;;
                 esac
             fi
+            commits=$(printf '%s\n' "$commits" | _split_details 4)
         fi
     elif command -v curl &>/dev/null; then
         info "Fetching all commits (curl, team mode)..."
@@ -776,7 +940,7 @@ fetch_team_commits() {
             local page_json
             page_json=$(curl -s -D "$tmpheaders" "$url")
             local page_commits
-            page_commits=$(echo "$page_json" | jq -r '.[] | [.sha[0:7], (.commit.message | split("\n")[0]), (.commit.author.date | split("T")[0]), (.author.login // .commit.author.name)] | @tsv' 2>/dev/null || true)
+            page_commits=$(echo "$page_json" | jq -r "$(_gh_commit_jq team)" 2>/dev/null | _split_details 4 || true)
             if [[ -n "$page_commits" ]]; then
                 if [[ -n "$commits" ]]; then
                     commits="${commits}"$'\n'"${page_commits}"
@@ -792,6 +956,8 @@ fetch_team_commits() {
     else
         die "No method available to fetch commits"
     fi
+
+    commits=$(printf '%s\n' "$commits" | filter_noise)
 
     if [[ -z "$commits" ]]; then
         warn "No commits found on $REPO_FULL ($PERIOD_LABEL)"
@@ -1071,6 +1237,10 @@ format_json() {
             }
         }')
 
+    if [[ -n "$commits" ]]; then
+        json=$(echo "$json" | jq --argjson ch "$(_change_stats_json "$commits")" 'if $ch then .stats += $ch else . end')
+    fi
+
     if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$summary" ]]; then
         json=$(echo "$json" | jq --arg s "$summary" '. + {summary: $s}')
     fi
@@ -1083,10 +1253,7 @@ format_json() {
 
     if [[ ("$mode" == "commits" || "$mode" == "all") && -n "$commits" ]]; then
         local commits_arr
-        commits_arr=$(echo "$commits" | jq -R -s '
-            split("\n") | map(select(length > 0)) | map(
-                split("\t") | {hash: .[0], message: .[1], date: .[2]}
-            )')
+        commits_arr=$(_commits_json "$commits")
         json=$(echo "$json" | jq --argjson c "$commits_arr" '. + {commits: $c}')
     fi
 
@@ -1116,7 +1283,7 @@ output_team_text() {
     local mode="${ARG_MODE:-$DEFAULT_MODE}"
 
     local authors
-    authors=$(echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | awk '{print $2}')
+    authors=$(echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | sed -E 's/^ *[0-9]+ //')
     local num_authors
     num_authors=$(echo "$authors" | wc -l | tr -d ' ')
 
@@ -1223,7 +1390,7 @@ output_team_markdown() {
     local mode="${ARG_MODE:-$DEFAULT_MODE}"
 
     local authors
-    authors=$(echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | awk '{print $2}')
+    authors=$(echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | sed -E 's/^ *[0-9]+ //')
     local num_authors
     num_authors=$(echo "$authors" | wc -l | tr -d ' ')
 
@@ -1356,7 +1523,7 @@ output_team_json() {
     IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$global_stats"
 
     local authors
-    authors=$(echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | awk '{print $2}')
+    authors=$(echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | sed -E 's/^ *[0-9]+ //')
     local num_authors
     num_authors=$(echo "$authors" | wc -l | tr -d ' ')
 
@@ -1400,6 +1567,7 @@ output_team_json() {
             },
             contributors: []
         }')
+    json=$(echo "$json" | jq --argjson ch "$(_change_stats_json "$global_3f")" 'if $ch then .global_stats += $ch else . end')
 
     while IFS= read -r author; do
         [[ -z "$author" ]] && continue
@@ -1442,6 +1610,8 @@ output_team_json() {
                 }
             }')
 
+        contributor_json=$(echo "$contributor_json" | jq --argjson ch "$(_change_stats_json "$ac")" 'if $ch then .stats += $ch else . end')
+
         if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$ac_summary" ]]; then
             contributor_json=$(echo "$contributor_json" | jq --arg s "$ac_summary" '. + {summary: $s}')
         fi
@@ -1454,10 +1624,7 @@ output_team_json() {
 
         if [[ ("$mode" == "commits" || "$mode" == "all") && -n "$ac" ]]; then
             local commits_arr
-            commits_arr=$(echo "$ac" | jq -R -s '
-                split("\n") | map(select(length > 0)) | map(
-                    split("\t") | {hash: .[0], message: .[1], date: .[2]}
-                )')
+            commits_arr=$(_commits_json "$ac")
             contributor_json=$(echo "$contributor_json" | jq --argjson c "$commits_arr" '. + {commits: $c}')
         fi
 
@@ -1536,6 +1703,11 @@ main() {
 
     # Compute period
     compute_period
+
+    # JSON output carries commit bodies (and changed files for local repos)
+    if [[ "${ARG_FORMAT:-$DEFAULT_FORMAT}" == "json" ]]; then
+        DETAILS_FILE=$(mktemp)
+    fi
 
     # === Team mode ===
     if [[ "$ARG_TEAM" == true ]]; then

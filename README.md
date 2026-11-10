@@ -18,6 +18,9 @@ The skill bundles its own copy of the CLI, so no other install is needed. Then a
 - "Recap my commits this month on this repo"
 - "Team recap of maxgfr/subtool for last month, in French, as markdown in recap.md"
 - "What did I ship in 2025? First person."
+- "Standup for yesterday" / "Weekly report" / "Release changelog for last month" / "Client activity report for January"
+
+The skill knows four ready-made styles: standup, weekly report, release changelog and client/activity report. It also uses commit bodies and changed files to write better summaries than commit subjects alone allow.
 
 Language (`en`, `fr`, …) and voice (`I`, `we`, `neutral` such as "Implementation of…", or `nominal` such as "Mise en place de…") come from your request.
 
@@ -58,8 +61,12 @@ Options:
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
   -b, --branch <branch>   Branch (default: auto-detected)
+  --since <YYYY-MM-DD>    Start date (inclusive), instead of -p
+  --until <YYYY-MM-DD>    End date (inclusive), instead of -p
   --team                  Team mode: all contributors, grouped by author
   --all-branches          Fetch commits from all branches
+  --exclude-author <glob> Skip matching authors in team mode (repeatable, case-insensitive)
+  --all-commits           Keep bot authors and release commits (skipped by default)
   --init                  Initialize configuration
   -h, --help              Show this help
   -v, --version           Show version
@@ -79,6 +86,12 @@ Options:
 | `<N>` | Last N months |
 | `YYYY-MM` | Specific month (e.g., `2026-01`) |
 | `YYYY` | Specific year (e.g., `2025`) |
+
+For any other range, use `--since` and/or `--until` (inclusive dates), e.g. `--since 2026-01-05 --until 2026-01-16` for a sprint.
+
+### Filtering
+
+Merge commits, bot authors (`*[bot]`, `*-bot`, such as `dependabot[bot]` or `semantic-release-bot`) and release commits (`chore(release): …`, bare version numbers) are skipped by default. The number of skipped commits is reported on stderr. Use `--all-commits` to keep them, and `--exclude-author "<glob>"` to leave specific people out of a team recap.
 
 ### Team Mode
 
@@ -112,6 +125,9 @@ git-recap -p all maxgfr/subtool
 
 # Full year 2025
 git-recap -p 2025 maxgfr/subtool
+
+# Custom date range
+git-recap --since 2026-01-05 --until 2026-01-16 .
 
 # Specific month, commits only
 git-recap -p 2026-01 -m commits maxgfr/subtool
@@ -160,7 +176,9 @@ Stats table, bullet list, and commit table. Hashes link to GitHub when the repos
 
 ### JSON
 
-Structured output with `repo`, `period`, `since`, `until`, `stats`, `bullets[]` and `commits[]` fields. In team mode, it has `global_stats` and `contributors[]`. This is what the agent skill reads. It adds `summary` (and `team_summary`) and rewrites `bullets`.
+Structured output with `repo`, `period`, `since`, `until`, `stats`, `bullets[]` and `commits[]` fields. In team mode, it has `global_stats` and `contributors[]`.
+
+Each commit has `hash`, `message`, `date` and `body`. For local repositories, it also has `files[]` (`path`, `additions`, `deletions`) with `additions`/`deletions` totals, and stats gain `lines_added`, `lines_deleted` and `files_changed`. This is what the agent skill reads. It adds `summary` (and `team_summary`) and rewrites `bullets`.
 
 With the skill, the agent inserts a Summary section and rewritten bullets into these same layouts.
 

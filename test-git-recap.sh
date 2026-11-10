@@ -368,6 +368,116 @@ rm -rf "$noai_dir"
 
 echo ""
 
+# ---------- Recap data ----------
+
+echo "$(_bold "Recap data")"
+
+data_dir=$(mktemp -d /tmp/git-recap-data.XXXXXX)
+data_repo="$data_dir/repo"
+mkdir -p "$data_repo" "$data_dir/bin"
+git -C "$data_repo" init -q -b main
+git -C "$data_repo" config user.email "recap@example.invalid"
+
+# _data_commit <date> <author> <subject> [body]
+_data_commit() {
+    local date="$1" author="$2" subject="$3" body="${4:-}"
+    local msg_args=(-m "$subject")
+    [[ -n "$body" ]] && msg_args+=(-m "$body")
+    printf '%s\n' "$subject" >> "$data_repo/notes.txt"
+    git -C "$data_repo" add notes.txt
+    GIT_AUTHOR_DATE="${date}T12:00:00" GIT_COMMITTER_DATE="${date}T12:00:00" \
+        git -C "$data_repo" -c user.name="$author" commit -q "${msg_args[@]}"
+}
+_data_commit 2025-01-10 "Recap Tester" "feat: add login page" $'Adds the OAuth flow.\n\nCloses #12'
+_data_commit 2025-01-20 "Recap Tester" "chore(release): 1.0.0"
+_data_commit 2025-01-21 "semantic-release-bot" "docs: update changelog"
+_data_commit 2025-01-22 "dependabot[bot]" "build(deps): bump foo"
+_data_commit 2025-02-10 "Jane Doe" "fix: crash on save"
+_data_commit 2025-02-11 "Recap Tester" "feat: export csv"
+
+# Team mode: author names with spaces, bots and release commits skipped
+out=$("$GIT_RECAP" --team -f json -m all -p all "$data_repo" 2>/dev/null)
+assert_eq "team keeps full author names with spaces" "Jane Doe,Recap Tester" "$(echo "$out" | jq -r '[.contributors[].user] | sort | join(",")')"
+assert_eq "team author with spaces gets its commits" "2" "$(echo "$out" | jq '.contributors[] | select(.user == "Recap Tester") | .bullets | length')"
+assert_eq "bots and release commits are skipped" "3" "$(echo "$out" | jq '.global_stats.total_commits')"
+assert_eq "team global stats include lines added" "3" "$(echo "$out" | jq '.global_stats.lines_added')"
+
+out=$("$GIT_RECAP" --team --all-commits -f json -m all -p all "$data_repo" 2>/dev/null)
+assert_eq "--all-commits keeps bots and release commits" "6" "$(echo "$out" | jq '.global_stats.total_commits')"
+
+out=$("$GIT_RECAP" --team --exclude-author "jane*" -f json -m all -p all "$data_repo" 2>/dev/null)
+assert_eq "--exclude-author removes matching authors" "Recap Tester" "$(echo "$out" | jq -r '[.contributors[].user] | join(",")')"
+
+out=$("$GIT_RECAP" --team -m all -p all "$data_repo" 2>&1)
+assert_contains "team text ranks authors with spaces" "$out" "Recap Tester"
+assert_contains "skipped commits are reported on stderr" "$out" "Skipped 3"
+
+# Single mode JSON: release commit skipped, body + numstat present
+out=$("$GIT_RECAP" -f json -m all -p all -u "Recap Tester" "$data_repo" 2>/dev/null)
+assert_eq "single mode skips release commits" "feat: export csv|feat: add login page" "$(echo "$out" | jq -r '[.commits[].message] | join("|")')"
+assert_eq "json commit carries its body" $'Adds the OAuth flow.\n\nCloses #12' "$(echo "$out" | jq -r '.commits[] | select(.message == "feat: add login page") | .body')"
+assert_eq "json commit without body has empty body" "" "$(echo "$out" | jq -r '.commits[0].body')"
+assert_eq "json commit lists changed files" "notes.txt:1:0" "$(echo "$out" | jq -r '.commits[0].files[0] | "\(.path):\(.additions):\(.deletions)"')"
+assert_eq "json stats include change totals" "2|0|1" "$(echo "$out" | jq -r '.stats | "\(.lines_added)|\(.lines_deleted)|\(.files_changed)"')"
+
+out=$("$GIT_RECAP" -m all -p all -u "Recap Tester" "$data_repo" 2>/dev/null)
+assert_not_contains "text output does not include commit bodies" "$out" "OAuth flow"
+
+# Custom date range
+out=$("$GIT_RECAP" -f json -m commits --since 2025-01-01 --until 2025-01-31 -u "Recap Tester" "$data_repo" 2>/dev/null)
+assert_eq "--since/--until selects the range" "feat: add login page" "$(echo "$out" | jq -r '[.commits[].message] | join("|")')"
+assert_eq "--since/--until period label" "2025-01-01 → 2025-01-31" "$(echo "$out" | jq -r '.period')"
+out=$("$GIT_RECAP" -f json -m commits --until 2025-01-10 -u "Recap Tester" "$data_repo" 2>/dev/null)
+assert_eq "--until is inclusive" "1" "$(echo "$out" | jq '.commits | length')"
+out=$("$GIT_RECAP" -f json -m commits --since 2025-02-11 -u "Recap Tester" "$data_repo" 2>/dev/null)
+assert_eq "--since alone runs until today" "feat: export csv" "$(echo "$out" | jq -r '[.commits[].message] | join("|")')"
+assert_exit "-p with --since exits 1" 1 "$GIT_RECAP" -p all --since 2025-01-01 "$data_repo"
+assert_exit "invalid --since date exits 1" 1 "$GIT_RECAP" --since 2025-13 "$data_repo"
+assert_exit "--since after --until exits 1" 1 "$GIT_RECAP" --since 2025-02-01 --until 2025-01-01 "$data_repo"
+
+# Remote mode through a gh mock: body kept, merges and release commits skipped
+cat > "$data_dir/bin/gh" <<'MOCK_GH'
+#!/usr/bin/env bash
+# Minimal gh mock: `auth status` succeeds; `api <path> [--jq <filter>]` serves fixtures
+[[ "$1" == "auth" ]] && exit 0
+[[ "$1" == "api" ]] || exit 1
+path="$2"; shift 2
+filter="."
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --jq) filter="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+case "$path" in
+    *"/commits"*) jq -r "$filter" "$GH_MOCK_COMMITS" ;;
+    *) printf '%s\n' '{"default_branch":"main"}' | jq -r "$filter" ;;
+esac
+MOCK_GH
+chmod +x "$data_dir/bin/gh"
+cat > "$data_dir/commits.json" <<'FIXTURE'
+[
+  {"sha": "aaaaaaa1111", "parents": [{"sha": "p0"}], "author": {"login": "recaptester"},
+   "commit": {"message": "feat: remote feature\n\nWhy: users asked\twith a tab", "author": {"name": "Recap Tester", "date": "2025-03-02T10:00:00Z"}}},
+  {"sha": "bbbbbbb2222", "parents": [{"sha": "p0"}, {"sha": "p1"}], "author": {"login": "recaptester"},
+   "commit": {"message": "Merge pull request #1 from x/y", "author": {"name": "Recap Tester", "date": "2025-03-03T10:00:00Z"}}},
+  {"sha": "ccccccc3333", "parents": [{"sha": "p0"}], "author": {"login": "semantic-release-bot"},
+   "commit": {"message": "chore(release): 1.2.0", "author": {"name": "semantic-release-bot", "date": "2025-03-04T10:00:00Z"}}}
+]
+FIXTURE
+out=$(PATH="$data_dir/bin:$PATH" GH_MOCK_COMMITS="$data_dir/commits.json" \
+    "$GIT_RECAP" -f json -m all -p 2025-03 -u recaptester mock/repo 2>/dev/null)
+assert_eq "remote skips merges and release commits" "aaaaaaa" "$(echo "$out" | jq -r '[.commits[].hash] | join(",")')"
+assert_eq "remote commit carries its body" $'Why: users asked\twith a tab' "$(echo "$out" | jq -r '.commits[0].body')"
+assert_eq "remote commit has no file list" "false" "$(echo "$out" | jq '.commits[0] | has("files")')"
+out=$(PATH="$data_dir/bin:$PATH" GH_MOCK_COMMITS="$data_dir/commits.json" \
+    "$GIT_RECAP" --team -f json -m all -p 2025-03 mock/repo 2>/dev/null)
+assert_eq "remote team skips bot authors" "recaptester" "$(echo "$out" | jq -r '[.contributors[].user] | join(",")')"
+
+rm -rf "$data_dir"
+
+echo ""
+
 # ---------- Agent skill ----------
 
 echo "$(_bold "Agent skill")"
