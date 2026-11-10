@@ -547,18 +547,24 @@ config_init() {
     local user=""
     if [[ -n "$detected_user" ]]; then
         printf "GitHub username [%s]: " "$detected_user" >&2
-        read -r user
+        read -r user || true  # end of input counts as an empty answer
         [[ -z "$user" ]] && user="$detected_user"
     else
         printf "GitHub username: " >&2
-        read -r user
+        read -r user || true
         [[ -z "$user" ]] && die "Username is required"
     fi
+    # The config file is parsed as KEY="value" lines
+    [[ "$user" != *'"'* ]] || die "Invalid username: $user (it cannot contain a double quote)"
 
     local default_format=""
     printf "Default format (text/markdown/json) [text]: " >&2
-    read -r default_format
+    read -r default_format || true
     [[ -z "$default_format" ]] && default_format="text"
+    case "$default_format" in
+        text|markdown|json) ;;
+        *) die "Invalid format: $default_format (expected: text, markdown, json)" ;;
+    esac
 
     cat > "$CONFIG_FILE" <<EOF
 # git-recap configuration

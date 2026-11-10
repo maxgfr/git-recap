@@ -975,6 +975,24 @@ assert_contains "curl fallback reports the HTTP error" "$err" "Access denied"
 err=$(CURL_MOCK_STATUS=404 _curl_run --team -p all mock/repo 2>&1 >/dev/null)
 assert_contains "curl fallback reports a missing repository" "$err" "Repository not found: mock/repo"
 
+# --init validates its answers and copes with end of input
+_init_run() { PATH="$mock_dir/bin:$PATH" HOME="$reg_dir/inithome" "$GIT_RECAP" --init; }
+mkdir -p "$reg_dir/inithome"
+err=$(printf 'me\nxml\n' | _init_run 2>&1)
+assert_eq "--init rejects an unknown format" "1" "$?"
+assert_contains "--init reports the unknown format" "$err" "Invalid format: xml"
+assert_eq "--init writes nothing after a bad answer" "no" "$([[ -e "$reg_dir/inithome/.git-recaprc" ]] && echo yes || echo no)"
+err=$(printf 'a"b\ntext\n' | _init_run 2>&1)
+assert_eq "--init rejects a username with a double quote" "1" "$?"
+printf 'me\nmarkdown\n' | _init_run >/dev/null 2>&1
+assert_eq "--init saves valid answers" 'GIT_RECAP_USER="me"|GIT_RECAP_FORMAT="markdown"' \
+    "$(grep -v '^#' "$reg_dir/inithome/.git-recaprc" | tr '\n' '|' | sed 's/|$//')"
+_init_run </dev/null >/dev/null 2>&1
+assert_eq "--init at end of input keeps the defaults" 'GIT_RECAP_USER="recaptester"|GIT_RECAP_FORMAT="text"' \
+    "$(grep -v '^#' "$reg_dir/inithome/.git-recaprc" | tr '\n' '|' | sed 's/|$//')"
+err=$(PATH="$nogh_bin" HOME="$reg_dir/inithome" "$GIT_RECAP" --init </dev/null 2>&1)
+assert_contains "--init at end of input without a detectable user says why it stops" "$err" "Username is required"
+
 # Team mode with a bare repo name needs a user to build owner/repo
 err=$(_curl_run --team -p all barename 2>&1 >/dev/null)
 assert_eq "bare repo name without a user exits 1" "1" "$?"
