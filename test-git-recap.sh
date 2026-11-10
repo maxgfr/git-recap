@@ -721,6 +721,63 @@ out=$(GH_MOCK_BRANCHES="$mock_dir/branches.json" _mock_run --all-branches -p all
 assert_eq "remote --all-branches prints each date once" "1" "$(echo "$out" | grep -c '^  2025-03-02$')"
 rm -f "$mock_dir/branches.json" "$mock_dir/commits-main.json" "$mock_dir/commits-dev.json"
 
+# curl fallback (no gh on PATH): a sandboxed PATH with a curl mock
+#   CURL_MOCK_STATUS  HTTP status to answer with (default: 200)
+#   CURL_MOCK_LOG     file receiving one line per URL requested
+# The commits endpoint is served in two pages; the default branch is "trunk".
+nogh_bin="$reg_dir/nogh-bin"
+mkdir -p "$nogh_bin"
+for tool in bash env git jq sed cut tr awk sort uniq wc head tail cat mktemp rm basename date; do
+    ln -s "$(command -v "$tool")" "$nogh_bin/$tool"
+done
+cat > "$nogh_bin/curl" <<'MOCK_CURL'
+#!/usr/bin/env bash
+body=/dev/null headers=/dev/null url=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o) body="$2"; shift 2 ;;
+        -D) headers="$2"; shift 2 ;;
+        -w|-H) shift 2 ;;
+        -*) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+[[ -n "${CURL_MOCK_LOG:-}" ]] && printf '%s\n' "$url" >> "$CURL_MOCK_LOG"
+status="${CURL_MOCK_STATUS:-200}"
+: > "$headers"
+if [[ "$status" != 200 ]]; then
+    printf '%s\n' '{"message":"API rate limit exceeded"}' > "$body"
+elif [[ "$url" == *"/branches"* ]]; then
+    printf '%s\n' '[{"name":"trunk"}]' > "$body"
+elif [[ "$url" == *"/commits"*"page=2"* ]]; then
+    printf '%s\n' '[{"sha": "eeeeeee5555", "parents": [{"sha": "p0"}], "author": {"login": "recaptester"},
+        "commit": {"message": "fix: second page", "author": {"name": "Recap Tester", "date": "2025-03-01T10:00:00Z"}}}]' > "$body"
+elif [[ "$url" == *"/commits"* ]]; then
+    printf '%s\n' '[{"sha": "aaaaaaa1111", "parents": [{"sha": "p0"}], "author": {"login": "recaptester"},
+        "commit": {"message": "feat: first page\n\nPage body", "author": {"name": "Recap Tester", "date": "2025-03-02T10:00:00Z"}}}]' > "$body"
+    printf 'link: <%s&page=2>; rel="next"\r\n' "$url" > "$headers"
+else
+    printf '%s\n' '{"default_branch":"trunk"}' > "$body"
+fi
+printf '%s' "$status"
+MOCK_CURL
+chmod +x "$nogh_bin/curl"
+_curl_run() { PATH="$nogh_bin" HOME="$reg_home" "$GIT_RECAP" "$@"; }
+
+out=$(CURL_MOCK_LOG="$reg_dir/curl.log" _curl_run -f json -p all -u recaptester mock/repo 2>"$reg_dir/curl.err")
+assert_contains "curl fallback is used without gh" "$(cat "$reg_dir/curl.err")" "(curl)"
+assert_eq "curl fallback follows pagination" "aaaaaaa,eeeeeee" "$(echo "$out" | jq -r '[.commits[].hash] | join(",")')"
+assert_eq "curl fallback keeps commit bodies" "Page body" "$(echo "$out" | jq -r '.commits[0].body')"
+assert_contains "curl fallback asks for the default branch" "$(cat "$reg_dir/curl.log")" "sha=trunk&"
+out=$(CURL_MOCK_LOG="$reg_dir/curl-all.log" _curl_run --all-branches -f json -p all -u recaptester mock/repo 2>/dev/null)
+assert_eq "curl fallback supports --all-branches" "2" "$(echo "$out" | jq '.commits | length')"
+assert_not_contains "curl fallback never sends a placeholder branch" "$(cat "$reg_dir/curl-all.log")" "__all__"
+err=$(CURL_MOCK_STATUS=403 _curl_run -p all -u recaptester mock/repo 2>&1 >/dev/null)
+assert_eq "curl fallback exits 1 on an HTTP error" "1" "$?"
+assert_contains "curl fallback reports the HTTP error" "$err" "Access denied"
+err=$(CURL_MOCK_STATUS=404 _curl_run --team -p all mock/repo 2>&1 >/dev/null)
+assert_contains "curl fallback reports a missing repository" "$err" "Repository not found: mock/repo"
+
 rm -rf "$reg_dir"
 
 echo ""

@@ -657,10 +657,8 @@ detect_default_branch() {
             BRANCH=$(git -C "$LOCAL_REPO_DIR" branch --show-current 2>/dev/null || true)
         fi
         [[ -z "$BRANCH" ]] && BRANCH="HEAD"
-    elif command -v gh &>/dev/null; then
-        BRANCH=$(_github_get "repos/${REPO_FULL}" '.default_branch') || exit 1
     else
-        BRANCH="main"
+        BRANCH=$(_github_get "repos/${REPO_FULL}" '.default_branch') || exit 1
     fi
 
     info "Branch: $BRANCH"
@@ -687,8 +685,9 @@ check_dependencies() {
     fi
 
     if [[ "${REPO_MODE:-remote}" == "remote" ]]; then
-        if ! command -v gh &>/dev/null && ! command -v curl &>/dev/null; then
-            die "gh or curl is required for remote repos"
+        if ! command -v gh &>/dev/null; then
+            command -v curl &>/dev/null || die "gh or curl is required for remote repos"
+            command -v jq &>/dev/null || die "jq is required when using curl fallback"
         fi
         check_gh_auth
     fi
@@ -756,7 +755,8 @@ _fetch_local() {
     _collect_local_details "${git_args[@]}"
 }
 
-# _github_die <gh stderr> : exit with a readable message for a failed API call
+# _github_die <error text> : exit with a readable message for a failed API call.
+# The HTTP status is read from a "(HTTP nnn)" marker, as printed by gh.
 _github_die() {
     local err="$1" status=""
     [[ "$err" =~ \(HTTP\ ([0-9]{3})\) ]] && status="${BASH_REMATCH[1]}"
@@ -773,19 +773,43 @@ _github_die() {
 }
 
 # _github_get <path?query> <jq filter> → filtered output of a paginated GitHub
-# API GET. Any failure aborts: a partial result is never returned.
+# API GET, through gh or, without it, curl. Any failure aborts: a partial
+# result is never returned. An empty repository (HTTP 409) yields nothing.
 _github_get() {
     local path="$1" filter="$2" out err
+    if ! command -v gh &>/dev/null; then
+        _github_get_curl "$path" "$filter"
+        return
+    fi
     if ! out=$(gh api "$path" --paginate --jq "$filter" 2>"$WORK_DIR/api.err" </dev/null); then
         err=$(cat "$WORK_DIR/api.err")
-        # An empty repository has no commits to list
         [[ "$err" == *"(HTTP 409)"* ]] && return 0
         _github_die "$err"
     fi
     [[ -z "$out" ]] || printf '%s\n' "$out"
 }
 
-_fetch_gh() {
+# curl backend of _github_get: unauthenticated, follows Link rel="next" pages
+_github_get_curl() {
+    local url="https://api.github.com/$1" filter="$2" status
+    local body="$WORK_DIR/curl.body" headers="$WORK_DIR/curl.headers"
+    while [[ -n "$url" ]]; do
+        # -g: brackets in a URL are data, not a glob
+        if ! status=$(curl -sS -g -L -o "$body" -D "$headers" -w '%{http_code}' \
+            -H "Accept: application/vnd.github+json" "$url" 2>"$WORK_DIR/api.err"); then
+            _github_die "$(cat "$WORK_DIR/api.err")"
+        fi
+        case "$status" in
+            200) ;;
+            409) return 0 ;;
+            *) _github_die "$(jq -r '.message // empty' "$body" 2>/dev/null) (HTTP ${status})" ;;
+        esac
+        jq -r "$filter" "$body" || die "Unexpected response from the GitHub API: $url"
+        url=$(sed -n 's/.*<\([^>]*\)>; *rel="next".*/\1/p' "$headers" | tr -d '\r')
+    done
+}
+
+_fetch_github() {
     local mode="$1" fields="$2" filter raw
     filter=$(_gh_commit_jq "$mode")
 
@@ -807,31 +831,6 @@ _fetch_gh() {
     printf '%s\n' "$raw" | _split_details "$fields"
 }
 
-_fetch_curl() {
-    local mode="$1" fields="$2"
-    command -v jq &>/dev/null || die "jq is required when using curl fallback"
-    local url
-    url="https://api.github.com/repos/${REPO_FULL}/commits?$(_commits_query "$BRANCH" "$mode")"
-    local tmpheaders commits="" page_json page_commits next_url
-    tmpheaders=$(mktemp)
-    while [[ -n "$url" ]]; do
-        page_json=$(curl -s -D "$tmpheaders" "$url")
-        page_commits=$(echo "$page_json" | jq -r "$(_gh_commit_jq "$mode")" 2>/dev/null | _split_details "$fields" || true)
-        if [[ -n "$page_commits" ]]; then
-            if [[ -n "$commits" ]]; then
-                commits="${commits}"$'\n'"${page_commits}"
-            else
-                commits="$page_commits"
-            fi
-        fi
-        # Parse Link header for next page
-        next_url=$(sed -n 's/.*<\([^>]*\)>; *rel="next".*/\1/p' "$tmpheaders" | tr -d '\r') || true
-        url="$next_url"
-    done
-    rm -f "$tmpheaders"
-    printf '%s\n' "$commits"
-}
-
 # fetch_commits [team] → filtered commit TSV (empty line when there is none)
 fetch_commits() {
     local mode="${1:-}" fields=3 what="commits" suffix=""
@@ -844,14 +843,11 @@ fetch_commits() {
     if [[ "$REPO_MODE" == "local" ]]; then
         info "Fetching ${what} (local${suffix})..."
         commits=$(_fetch_local "$mode") || exit 1
-    elif command -v gh &>/dev/null; then
-        info "Fetching ${what} (gh api${suffix})..."
-        commits=$(_fetch_gh "$mode" "$fields") || exit 1
-    elif command -v curl &>/dev/null; then
-        info "Fetching ${what} (curl${suffix})..."
-        commits=$(_fetch_curl "$mode" "$fields") || exit 1
     else
-        die "No method available to fetch commits"
+        local client="gh api"
+        command -v gh &>/dev/null || client="curl"
+        info "Fetching ${what} (${client}${suffix})..."
+        commits=$(_fetch_github "$mode" "$fields") || exit 1
     fi
 
     commits=$(printf '%s\n' "$commits" | filter_noise)
