@@ -935,69 +935,63 @@ fetch_commits() {
 # Stats
 # ==============================================================================
 
+# compute_stats <rows> → total|first_date|last_date|busiest_day|busiest_count|
+#                        active_days|avg_per_day|busiest_weekday|longest_streak
 compute_stats() {
     local commits="$1"
     [[ -z "$commits" ]] && return
 
-    local total
-    total=$(echo "$commits" | wc -l | tr -d ' ')
-
-    local dates
-    dates=$(echo "$commits" | cut -f3 | sort)
-    local first_date last_date
-    first_date=$(echo "$dates" | head -1)
-    last_date=$(echo "$dates" | tail -1)
-
-    # Most active day
-    local busiest_line
-    busiest_line=$(echo "$dates" | sort | uniq -c | sort -rn | head -1)
-    local busiest_count busiest_day
-    busiest_count=$(echo "$busiest_line" | awk '{print $1}')
-    busiest_day=$(echo "$busiest_line" | awk '{print $2}')
-
-    # Active days & average
-    local active_days avg_per_day
-    active_days=$(echo "$dates" | sort -u | wc -l | tr -d ' ')
-    if [[ "$active_days" -gt 0 ]]; then
-        avg_per_day=$(LANG=C LC_ALL=C awk "BEGIN {printf \"%.1f\", $total / $active_days}")
-    else
-        avg_per_day="0.0"
-    fi
-
-    # Busiest weekday (Tomohiko Sakamoto's algorithm, pure awk)
-    local busiest_weekday
-    busiest_weekday=$(echo "$dates" | awk '{
-        split($0, a, "-")
-        y = a[1]+0; m = a[2]+0; d = a[3]+0
-        split("0 3 2 5 0 3 5 1 4 6 2 4", t, " ")
-        if (m < 3) y--
-        dow = (y + int(y/4) - int(y/100) + int(y/400) + t[m] + d) % 7
-        counts[dow]++
-    }
-    END {
-        split("Sunday Monday Tuesday Wednesday Thursday Friday Saturday", names, " ")
-        max_val = 0; best = 0
-        for (i = 0; i <= 6; i++) {
-            if (counts[i]+0 > max_val) { max_val = counts[i]; best = i }
+    printf '%s\n' "$commits" | LC_ALL=C awk -F'\t' '
+        # Julian day number of YYYY-MM-DD (jdn % 7 is 0 on Mondays)
+        function jdn(date,    p, y, m, d, a) {
+            split(date, p, "-")
+            y = p[1] + 0; m = p[2] + 0; d = p[3] + 0
+            a = int((14 - m) / 12); y = y + 4800 - a; m = m + 12 * a - 3
+            return d + int((153 * m + 2) / 5) + 365 * y + int(y / 4) - int(y / 100) + int(y / 400) - 32045
         }
-        print names[best+1]
-    }')
+        length($0) > 0 {
+            total++
+            date = $3 ""
+            if (!(date in per_day)) {
+                j = jdn(date)
+                on_day[j] = 1
+                if (active_days == 0 || j < first_j) first_j = j
+                if (active_days == 0 || j > last_j) last_j = j
+                active_days++
+            }
+            per_day[date]++
+            if (first == "" || date < first) first = date
+            if (date > last) last = date
+        }
+        END {
+            if (total == 0) exit
 
-    # Longest streak (consecutive days with commits)
-    local longest_streak
-    longest_streak=$(echo "$dates" | sort -u | awk '{
-        split($0, a, "-")
-        y = a[1]+0; m = a[2]+0; d = a[3]+0
-        # days since epoch (approx, good enough for consecutive check)
-        jdn = d + int((153*(m + 12*int((14-m)/12) - 3)+2)/5) + 365*(y + 4800 - int((14-m)/12)) + int((y + 4800 - int((14-m)/12))/4) - int((y + 4800 - int((14-m)/12))/100) + int((y + 4800 - int((14-m)/12))/400) - 32045
-        if (NR == 1) { streak = 1; max_streak = 1; prev = jdn; next }
-        if (jdn == prev + 1) { streak++ } else { streak = 1 }
-        if (streak > max_streak) max_streak = streak
-        prev = jdn
-    }
-    END { print max_streak+0 }')
+            # Busiest day: most commits, the latest one on a tie
+            busiest_day = ""; busiest_count = 0
+            for (date in per_day) {
+                if (per_day[date] > busiest_count || (per_day[date] == busiest_count && (date "") > busiest_day)) {
+                    busiest_count = per_day[date]
+                    busiest_day = date ""
+                }
+                per_weekday[(jdn(date) + 1) % 7] += per_day[date]  # 0 = Sunday
+            }
 
-    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s' "$total" "$first_date" "$last_date" "$busiest_day" "$busiest_count" "$active_days" "$avg_per_day" "$busiest_weekday" "$longest_streak"
+            # Busiest weekday: the first one in the week on a tie
+            split("Sunday Monday Tuesday Wednesday Thursday Friday Saturday", names, " ")
+            best = 0; most = 0
+            for (i = 0; i <= 6; i++) {
+                if (per_weekday[i] + 0 > most) { most = per_weekday[i]; best = i }
+            }
+
+            # Longest streak of consecutive days with commits
+            streak = 0; longest = 0
+            for (j = first_j; j <= last_j; j++) {
+                if (j in on_day) { streak++; if (streak > longest) longest = streak } else streak = 0
+            }
+
+            printf "%d|%s|%s|%s|%d|%d|%.1f|%s|%d", total, first, last, busiest_day, busiest_count,
+                active_days, total / active_days, names[best + 1], longest
+        }'
 }
 
 # ==============================================================================

@@ -291,6 +291,16 @@ assert_contains "stats busiest count is 2" "$out" "|2|"
 assert_contains "stats active days=2" "$out" "|2|"
 assert_contains "stats avg per day=1.5" "$out" "|1.5"
 
+assert_eq "stats, every field" "3|2026-03-01|2026-03-15|2026-03-01|2|2|1.5|Sunday|1" "$out"
+
+# Ties: the latest day wins, and the first weekday of the week (Sunday first)
+input=$'abc1234\tone\t2026-03-03\nabc1235\ttwo\t2026-03-02'
+assert_eq "stats tie-breaking and a two-day streak" "2|2026-03-02|2026-03-03|2026-03-03|1|2|1.0|Monday|2" "$(compute_stats "$input")"
+
+# Streaks across a year boundary and a leap day, input in any order
+input=$'a1\tx\t2024-02-29\na2\tx\t2023-12-31\na3\tx\t2024-03-01\na4\tx\t2024-01-01\na5\tx\t2024-02-28'
+assert_eq "stats streak over a leap day" "5|2023-12-31|2024-03-01|2024-03-01|1|5|1.0|Sunday|3" "$(compute_stats "$input")"
+
 # Single commit
 input=$'abc1234\tonly commit\t2026-05-10'
 out=$(compute_stats "$input")
