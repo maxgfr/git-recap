@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Commit data is bytes. In the C locale, text that is not valid UTF-8 (legacy
+# Latin-1 history) cannot stop cut, sort or tr, and ordering is the same on
+# every machine. The user's locale is kept for case folding only.
+USER_LOCALE="${LC_ALL:-${LC_CTYPE:-${LANG:-C}}}"
+export LC_ALL=C
+
 # ==============================================================================
 # git-recap — Commit recap data generator (AI writing lives in the agent skill)
 # ==============================================================================
@@ -125,7 +131,7 @@ NO_AUTHOR="(unknown)"
 
 # _tsv_rows : stdin = rows of \x1f-separated fields (git log) → TSV rows
 _tsv_rows() {
-    LC_ALL=C awk -F'\037' -v OFS='\t' -v no_subject="$NO_SUBJECT" -v no_author="$NO_AUTHOR" '{
+    awk -F'\037' -v OFS='\t' -v no_subject="$NO_SUBJECT" -v no_author="$NO_AUTHOR" '{
         for (i = 1; i <= NF; i++) gsub(/\t/, " ", $i)
         if ($2 == "") $2 = no_subject
         if (NF >= 4 && $4 == "") $4 = no_author
@@ -166,7 +172,7 @@ _split_details() {
                 body: ((.[$n] // "\"\"") | fromjson | gsub("\r"; "") | sub("^\\s+"; "") | sub("\\s+$"; ""))
             }' >> "$DETAILS_FILE" || die "Could not read commit bodies from the GitHub API response"
     fi
-    printf '%s\n' "$raw" | LC_ALL=C cut -f1-"$n"
+    printf '%s\n' "$raw" | cut -f1-"$n"
 }
 
 # _collect_local_details <git log args...> : records body + numstat per commit
@@ -253,13 +259,14 @@ _is_release_commit() {
     [[ "$1" =~ ^chore\(release\) || "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
-# _lowercase : stdin → stdout in lower case. Text that is not valid in the
-# current locale (BSD tr stops on it) is lowercased byte-wise instead.
+# _lowercase : stdin → stdout in lower case, folding in the user's locale so
+# that accented letters match too. Text that is not valid in that locale (BSD
+# tr stops on it) is lowercased byte-wise instead.
 _lowercase() {
     local text out
     text=$(cat)
-    out=$(printf '%s\n' "$text" | tr '[:upper:]' '[:lower:]' 2>/dev/null) \
-        || out=$(printf '%s\n' "$text" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+    out=$(printf '%s\n' "$text" | LC_ALL="$USER_LOCALE" tr '[:upper:]' '[:lower:]' 2>/dev/null) \
+        || out=$(printf '%s\n' "$text" | tr '[:upper:]' '[:lower:]')
     printf '%s\n' "$out"
 }
 
@@ -279,7 +286,7 @@ filter_noise() {
         done <<< "$(printf '%s' "$ARG_EXCLUDE_AUTHORS" | _lowercase)"
         if [[ ${#patterns[@]} -gt 0 ]]; then
             exclude=true
-            lowered=$(printf '%s\n' "$rows" | LC_ALL=C cut -f4 | _lowercase)
+            lowered=$(printf '%s\n' "$rows" | cut -f4 | _lowercase)
         fi
     fi
 
@@ -792,7 +799,6 @@ check_dependencies() {
 
 # _urlencode <string> → percent-encoded query parameter value (byte-wise)
 _urlencode() {
-    local LC_ALL=C
     local s="$1" out="" c code hex i
     for (( i = 0; i < ${#s}; i++ )); do
         c="${s:i:1}"
@@ -975,7 +981,7 @@ compute_stats() {
     local commits="$1"
     [[ -z "$commits" ]] && return
 
-    printf '%s\n' "$commits" | LC_ALL=C awk -F'\t' '
+    printf '%s\n' "$commits" | awk -F'\t' '
         # Julian day number of YYYY-MM-DD (jdn % 7 is 0 on Mondays)
         function jdn(date,    p, y, m, d, a) {
             split(date, p, "-")
@@ -1207,7 +1213,7 @@ format_json() {
 # column. The name goes through the environment (awk -v would interpret its
 # backslashes) and is compared as a string ("0123" is not "123").
 _author_commits() {
-    printf '%s\n' "$1" | AUTHOR="$2" LC_ALL=C awk -F'\t' -v OFS='\t' \
+    printf '%s\n' "$1" | AUTHOR="$2" awk -F'\t' -v OFS='\t' \
         '($4 "") == (ENVIRON["AUTHOR"] "") { print $1, $2, $3 }'
 }
 
@@ -1269,7 +1275,7 @@ output_team_text() {
     local rank=1
     echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | while read -r cnt author; do
         local pct
-        pct=$(LANG=C LC_ALL=C awk "BEGIN {printf \"%.0f\", ($cnt / $total) * 100}")
+        pct=$(awk "BEGIN {printf \"%.0f\", ($cnt / $total) * 100}")
         printf '  %d. %-20s %3d commits (%s%%)\n' "$rank" "$author" "$cnt" "$pct"
         rank=$((rank + 1))
     done
@@ -1378,7 +1384,7 @@ output_team_markdown() {
     local rank=1
     echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | while read -r cnt author; do
         local pct
-        pct=$(LANG=C LC_ALL=C awk "BEGIN {printf \"%.0f\", ($cnt / $total) * 100}")
+        pct=$(awk "BEGIN {printf \"%.0f\", ($cnt / $total) * 100}")
         echo "| ${rank} | ${author//|/\\|} | ${cnt} | ${pct}% |"
         rank=$((rank + 1))
     done

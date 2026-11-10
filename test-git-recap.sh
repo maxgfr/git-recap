@@ -658,6 +658,37 @@ assert_eq "stats ignore tabs in subjects" "2025-01-12|2025-01-14" "$(echo "$out"
 out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m commits -u "Recap Tester" "$reg_dir/odd" 2>/dev/null)
 assert_contains "text lists the tabbed subject under its date" "$out" "  fix: indent with tabs"
 
+# A commit that is not valid UTF-8 (legacy Latin-1 history) does not truncate the recap.
+# git commit would re-encode it, so the commits are written with fast-import; \351 is a Latin-1 "é".
+_reg_init "$reg_dir/latin1"
+{
+    printf 'commit refs/heads/main\nmark :1\n'
+    printf 'author Recap Tester <recap@example.invalid> 1736510400 +0000\n'
+    printf 'committer Recap Tester <recap@example.invalid> 1736510400 +0000\n'
+    printf 'data 13\nfeat: before\n'
+    printf 'commit refs/heads/main\nmark :2\n'
+    printf 'author Ren\351 Latin <rene@example.invalid> 1736596800 +0000\n'
+    printf 'committer Ren\351 Latin <rene@example.invalid> 1736596800 +0000\n'
+    printf 'data 20\nfix: caf\351 in latin1\nfrom :1\n'
+    printf 'commit refs/heads/main\nmark :3\n'
+    printf 'author Recap Tester <recap@example.invalid> 1736683200 +0000\n'
+    printf 'committer Recap Tester <recap@example.invalid> 1736683200 +0000\n'
+    printf 'data 12\nfeat: after\nfrom :2\n'
+} | git -C "$reg_dir/latin1" fast-import --quiet
+for latin1_locale in en_US.UTF-8 C; do
+    out=$(HOME="$reg_home" LC_ALL="$latin1_locale" "$GIT_RECAP" --team -p all "$reg_dir/latin1" 2>/dev/null)
+    assert_contains "non-UTF-8 commit ($latin1_locale): stats count every commit" "$out" "Total commits:   3"
+    assert_contains "non-UTF-8 commit ($latin1_locale): period covers every commit" "$out" "Period:          2025-01-10 → 2025-01-12"
+    assert_contains "non-UTF-8 commit ($latin1_locale): two contributors" "$out" "Contributors:    2"
+    assert_contains "non-UTF-8 commit ($latin1_locale): bullets after it are kept" "$out" "• feat: before"
+    out=$(HOME="$reg_home" LC_ALL="$latin1_locale" "$GIT_RECAP" -p all -u "Recap Tester" "$reg_dir/latin1" 2>/dev/null)
+    assert_contains "non-UTF-8 commit ($latin1_locale): single-user recap is complete" "$out" "Total commits:   2"
+    out=$(HOME="$reg_home" LC_ALL="$latin1_locale" "$GIT_RECAP" -f json -p all -u "Latin" "$reg_dir/latin1" 2>/dev/null)
+    assert_eq "non-UTF-8 commit ($latin1_locale): JSON is produced" "1" "$(echo "$out" | jq '.commits | length' 2>/dev/null)"
+    out=$(HOME="$reg_home" LC_ALL="$latin1_locale" "$GIT_RECAP" --team --exclude-author "recap*" -p all "$reg_dir/latin1" 2>/dev/null)
+    assert_contains "non-UTF-8 author ($latin1_locale): --exclude-author filters the others" "$out" "Contributors:    1"
+done
+
 # Pipes in subjects and author names do not add markdown table columns
 _reg_init "$reg_dir/pipes"
 _reg_commit "$reg_dir/pipes" 2025-01-12 "Pipe|Name" "feat: support a|b syntax"
