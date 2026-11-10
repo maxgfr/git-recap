@@ -648,6 +648,21 @@ assert_eq "stats ignore tabs in subjects" "2025-01-12|2025-01-14" "$(echo "$out"
 out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m commits -u "Recap Tester" "$reg_dir/odd" 2>/dev/null)
 assert_contains "text lists the tabbed subject under its date" "$out" "  fix: indent with tabs"
 
+# Team sections for authors whose name has a backslash or looks like a number
+_reg_init "$reg_dir/names"
+_reg_commit "$reg_dir/names" 2025-01-10 'CORP\jsmith' "feat: one"
+_reg_commit "$reg_dir/names" 2025-01-11 'CORP\jsmith' "feat: two"
+_reg_commit "$reg_dir/names" 2025-01-12 '0123' "feat: three"
+_reg_commit "$reg_dir/names" 2025-01-13 '123' "feat: four"
+out=$(HOME="$reg_home" "$GIT_RECAP" --team -f json -p all "$reg_dir/names" 2>/dev/null)
+assert_eq "author with a backslash keeps its commits" "2" "$(echo "$out" | jq '.contributors[] | select(.user == "CORP\\jsmith") | .commits | length')"
+assert_eq "numeric-looking authors are not merged" "feat: three|feat: four" \
+    "$(echo "$out" | jq -r '[(.contributors[] | select(.user == "0123") | .commits[].message), (.contributors[] | select(.user == "123") | .commits[].message)] | join("|")')"
+out=$(HOME="$reg_home" "$GIT_RECAP" --team -p all "$reg_dir/names" 2>/dev/null)
+assert_contains "team text counts the commits of an author with a backslash" "$out" '▶ CORP\jsmith (2 commits)'
+out=$(HOME="$reg_home" "$GIT_RECAP" --team -f markdown -p all "$reg_dir/names" 2>/dev/null)
+assert_contains "team markdown counts the commits of an author with a backslash" "$out" '## CORP\jsmith (2 commits)'
+
 # Backslashes, tabs and CRLF in remote subjects, authors and bodies
 cat > "$mock_dir/commits-odd.json" <<'FIXTURE'
 [

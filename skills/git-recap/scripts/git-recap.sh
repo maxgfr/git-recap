@@ -1186,6 +1186,14 @@ format_json() {
 # Team mode output
 # ==============================================================================
 
+# _author_commits <team rows> <author> → that author's rows, without the author
+# column. The name goes through the environment (awk -v would interpret its
+# backslashes) and is compared as a string ("0123" is not "123").
+_author_commits() {
+    printf '%s\n' "$1" | AUTHOR="$2" LC_ALL=C awk -F'\t' -v OFS='\t' \
+        '($4 "") == (ENVIRON["AUTHOR"] "") { print $1, $2, $3 }'
+}
+
 _team_stats_text() {
     local stats="$1" label="$2"
     [[ -z "$stats" ]] && return
@@ -1254,7 +1262,7 @@ output_team_text() {
     while IFS= read -r author; do
         [[ -z "$author" ]] && continue
         local ac
-        ac=$(echo "$all_commits" | awk -F'\t' -v a="$author" '$4==a' | cut -f1-3)
+        ac=$(_author_commits "$all_commits" "$author")
         local ac_count
         ac_count=$(echo "$ac" | wc -l | tr -d ' ')
 
@@ -1365,7 +1373,7 @@ output_team_markdown() {
     while IFS= read -r author; do
         [[ -z "$author" ]] && continue
         local ac
-        ac=$(echo "$all_commits" | awk -F'\t' -v a="$author" '$4==a' | cut -f1-3)
+        ac=$(_author_commits "$all_commits" "$author")
         local ac_count
         ac_count=$(echo "$ac" | wc -l | tr -d ' ')
 
@@ -1494,7 +1502,7 @@ output_team_json() {
     while IFS= read -r author; do
         [[ -z "$author" ]] && continue
         local ac
-        ac=$(echo "$all_commits" | awk -F'\t' -v a="$author" '$4==a' | cut -f1-3)
+        ac=$(_author_commits "$all_commits" "$author")
         local ac_stats
         ac_stats=$(compute_stats "$ac")
         local a_total a_first a_last a_busiest_day a_busiest_count a_active_days a_avg a_weekday a_streak
