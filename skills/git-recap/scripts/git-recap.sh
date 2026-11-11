@@ -184,28 +184,26 @@ _collect_local_details() {
     git -C "$LOCAL_REPO_DIR" log "$@" --numstat -z --format="%x00${marker}%x00%h%x00%b" -- \
         | jq -R -s -c --arg marker "$marker" '
         def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
-        # One linear pass over the NUL-separated tokens. Emits {c, h, body} for
-        # each commit header and {c, f} for each changed file (c = commit index).
-        [foreach (split("\u0000")[]) as $tok ({c: 0, st: "skip"};
-            if $tok == $marker then {c: (.c + 1), st: "hash", out: null}
-            elif .st == "hash" then .h = $tok | .st = "body" | .out = null
-            elif .st == "body" then .st = "stat" | .out = {c, h, body: ($tok | trim)}
-            elif .st == "old" then .st = "new" | .out = null
-            elif .st == "new" then .st = "stat" | .out = {c, f: (.pending | .path = $tok)}
-            elif .st == "stat" then
-                ($tok | ltrimstr("\n") | split("\t")) as $f
-                | if ($f | length) >= 3 then
-                    {path: ($f[2:] | join("\t")),
-                     additions: ($f[0] | tonumber? // 0), deletions: ($f[1] | tonumber? // 0)} as $e
-                    | if $e.path == "" then .pending = $e | .st = "old" | .out = null
-                      else .out = {c, f: $e} end
-                  else .out = null end
-            else .out = null end;
-            .out // empty)] as $items
-        | ($items | map(select(has("f"))) | group_by(.c)
-            | map({key: (.[0].c | tostring), value: map(.f)}) | from_entries) as $files
-        | $items[] | select(has("h"))
-        | {hash: .h, body: .body, files: ($files[.c | tostring] // [])}
+        # One commit at a time (memory stays per commit); within a commit, one
+        # linear pass over its NUL-separated numstat tokens
+        split("\u0000" + $marker + "\u0000") | .[1:][] | split("\u0000") as $t
+        | {
+            hash: $t[0],
+            body: (($t[1] // "") | trim),
+            files: [foreach ($t[2:][]) as $tok ({st: "stat"};
+                if .st == "old" then .st = "new" | .out = null
+                elif .st == "new" then .st = "stat" | .out = (.pending | .path = $tok)
+                else
+                    ($tok | ltrimstr("\n") | split("\t")) as $f
+                    | if ($f | length) >= 3 then
+                        {path: ($f[2:] | join("\t")),
+                         additions: ($f[0] | tonumber? // 0), deletions: ($f[1] | tonumber? // 0)} as $e
+                        | if $e.path == "" then .pending = $e | .st = "old" | .out = null
+                          else .out = $e end
+                      else .out = null end
+                end;
+                .out // empty)]
+          }
         | .additions = ([.files[].additions] | add // 0)
         | .deletions = ([.files[].deletions] | add // 0)' >> "$DETAILS_FILE" \
         || die "Could not read commit details from $LOCAL_REPO_DIR"
@@ -298,14 +296,16 @@ _lowercase() {
         printf '%s\n' "$out"
         return 0
     fi
-    # Some line is not valid in the locale: fold line by line, byte-wise only
-    # where needed (rare: this forks per line)
-    local line
-    while IFS= read -r line || [[ -n "$line" ]]; do
+    # Some line is not valid in the locale: fold each distinct line on its own
+    # (byte-wise only where needed), then map every input line to its result.
+    # Lines are authors here: few distinct values, and no tabs in them.
+    local line map="$WORK_DIR/lowercase.map"
+    while IFS= read -r line; do
         out=$(printf '%s\n' "$line" | LC_ALL="$MATCH_LOCALE" tr '[:upper:]' '[:lower:]' 2>/dev/null) \
             || out=$(printf '%s\n' "$line" | tr '[:upper:]' '[:lower:]')
-        printf '%s\n' "$out"
-    done <<< "$text"
+        printf '%s\t%s\n' "$line" "$out"
+    done <<< "$(printf '%s\n' "$text" | sort -u)" > "$map"
+    printf '%s\n' "$text" | awk -F'\t' 'NR == FNR { lower[$1] = $2; next } { print lower[$0] }' "$map" -
 }
 
 # _glob_match <text> <glob> : glob match in the user's locale, so that "?"
@@ -772,19 +772,17 @@ resolve_repo() {
     info "Repo: ${REPO_FULL}${via}"
 }
 
-# _local_ref_exists <revision> : true when <revision> names a commit of the
-# local repo (a ref, main~3), or is a range whose ends are commits (a..b, a...b)
+# _local_ref_exists <revision> : true when <revision> is valid revision syntax
+# for commits of the local repo (a ref, main~3, a..b, HEAD^!, :/text)
 _local_ref_exists() {
-    local rev="$1" end
-    if [[ "$rev" == *..* ]]; then
-        local ends="${rev/.../..}"
-        for end in "${ends%%..*}" "${ends#*..}"; do
-            # An empty end means HEAD (main.. is main..HEAD)
-            git -C "$LOCAL_REPO_DIR" rev-parse --verify --quiet "${end:-HEAD}^{commit}" >/dev/null 2>&1 || return 1
-        done
-        return 0
-    fi
-    git -C "$LOCAL_REPO_DIR" rev-parse --verify --quiet "${rev}^{commit}" >/dev/null 2>&1
+    # rev-parse resolves every form (and fails on unknown names); each object
+    # it names must then be a commit: rev-list would silently skip a tree or a blob
+    local ids types
+    ids=$(git -C "$LOCAL_REPO_DIR" rev-parse --revs-only "$1" -- 2>/dev/null) || return 1
+    [[ -n "$ids" ]] || return 1
+    types=$(printf '%s\n' "${ids//^/}" \
+        | git -C "$LOCAL_REPO_DIR" cat-file --batch-check='%(objecttype)' 2>/dev/null) || return 1
+    [[ "$(printf '%s\n' "$types" | sort -u)" == "commit" ]]
 }
 
 detect_default_branch() {

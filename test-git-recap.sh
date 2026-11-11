@@ -6,9 +6,10 @@
 
 set -uo pipefail
 
-# The tests build their own repositories and identities
+# The tests build their own repositories and identities (GH_TOKEN is kept:
+# it is the CI credential for the live GitHub tests)
 unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL \
-    GIT_COMMITTER_DATE GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GH_TOKEN GITHUB_TOKEN
+    GIT_COMMITTER_DATE GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${SCRIPT_DIR}/script.sh"
@@ -941,6 +942,15 @@ out=$(HOME="$reg_home" "$GIT_RECAP" -b "main~1..main" -p all -m commits -u "Reca
 assert_contains "-b with a range lists its commits" "$out" "feat: second on main"
 assert_not_contains "-b with a range stops at its start" "$out" "feat: tracked file"
 
+# -b takes every revision form git does
+out=$(HOME="$reg_home" "$GIT_RECAP" -b 'HEAD^!' -p all -m commits -u "Recap Tester" "$reg_dir/stash" 2>/dev/null)
+assert_contains "-b HEAD^! lists that commit" "$out" "feat: second on main"
+assert_not_contains "-b HEAD^! lists only that commit" "$out" "feat: tracked file"
+out=$(HOME="$reg_home" "$GIT_RECAP" -b ':/tracked file' -p all -m commits -u "Recap Tester" "$reg_dir/stash" 2>/dev/null)
+assert_contains "-b :/text finds the commit by message" "$out" "feat: tracked file"
+out=$(HOME="$reg_home" "$GIT_RECAP" -b ':/tracked file..main' -p all -m commits -u "Recap Tester" "$reg_dir/stash" 2>/dev/null)
+assert_contains "-b :/text..main is a range" "$out" "feat: second on main"
+
 # File names with control characters, leading newlines or tabs are kept as they are
 _reg_init "$reg_dir/ctrl"
 {
@@ -970,7 +980,7 @@ out=$(HOME="$reg_home" "$GIT_RECAP" -f json -p all -u "Recap Tester" "$reg_dir/s
 assert_eq "non-ASCII file names are not C-quoted" "数据.txt" "$(echo "$out" | jq -r '.commits[0].files[0].path')"
 
 # GitHub API failures are reported, in every mode, instead of "No commits found"
-_mock_run() { PATH="$mock_dir/bin:$PATH" HOME="$reg_home" "$GIT_RECAP" "$@"; }
+_mock_run() { env -u GH_TOKEN -u GITHUB_TOKEN PATH="$mock_dir/bin:$PATH" HOME="$reg_home" "$GIT_RECAP" "$@"; }
 for api_mode in "" "--all-branches" "--team" "--team --all-branches"; do
     # shellcheck disable=SC2086  # api_mode holds zero or more flags
     err=$(GH_MOCK_FAIL=404 _mock_run $api_mode -p all -u recaptester mock/repo 2>&1 >/dev/null)
@@ -1026,8 +1036,10 @@ out=$(GH_MOCK_LOGIN="mona_octo" _mock_run -p all mock/repo 2>&1 >/dev/null)
 assert_contains "login with an underscore is detected" "$out" "User: mona_octo"
 
 # A 401 with GH_TOKEN set points at the token
-err=$(GH_TOKEN=revoked GH_MOCK_FAIL=401 _mock_run -p all -u recaptester mock/repo 2>&1 >/dev/null)
+err=$(GH_MOCK_FAIL=401 PATH="$mock_dir/bin:$PATH" HOME="$reg_home" GH_TOKEN=revoked "$GIT_RECAP" -p all -u recaptester mock/repo 2>&1 >/dev/null)
 assert_contains "401 with GH_TOKEN set points at the token" "$err" "Check GH_TOKEN"
+err=$(GH_MOCK_FAIL=401 _mock_run -p all -u recaptester mock/repo 2>&1 >/dev/null)
+assert_contains "401 through gh without a token points at gh auth login" "$err" "Run: gh auth login"
 
 # A network failure shows the real error, not only an authentication hint
 err=$(GH_MOCK_NETFAIL=1 _mock_run -p all -u recaptester mock/repo 2>&1 >/dev/null)
