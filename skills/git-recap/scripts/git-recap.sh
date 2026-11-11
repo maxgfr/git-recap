@@ -114,14 +114,6 @@ _month_label() {
     echo "${_MONTH_NAMES[$(( 10#${1:5:2} - 1 ))]} ${1:0:4}"
 }
 
-# raw_bullets <commits> → commit messages, one per line, for modes bullets/all
-raw_bullets() {
-    local mode="${ARG_MODE:-$DEFAULT_MODE}"
-    [[ "$mode" != "bullets" && "$mode" != "all" ]] && return
-    [[ -z "$1" ]] && return
-    printf '%s\n' "$1" | cut -f2
-}
-
 # --- Commit rows and details (body, changed files) ---
 # Rows are TSV. Fetchers guarantee that no field contains a tab and that no
 # field is empty (placeholders below), so rows always split cleanly.
@@ -317,25 +309,6 @@ filter_noise() {
 
     if [[ $skipped -gt 0 ]]; then
         info "Skipped $skipped bot/release/excluded commit(s) (use --all-commits to keep bots and releases)"
-    fi
-}
-
-# _print_bullets <bullets> <prefix> : one prefixed line per bullet
-# (printf, not echo: a subject may be "-n" or "-e")
-_print_bullets() {
-    local line
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && printf '%s%s\n' "$2" "$line"
-    done <<< "$1"
-    return 0
-}
-
-_markdown_commit_ref() {
-    local hash="$1"
-    if [[ -n "$REPO_WEB_URL" ]]; then
-        printf '[%s](%s/commit/%s)' "$hash" "$REPO_WEB_URL" "$hash"
-    else
-        printf '%s' "$hash"
     fi
 }
 
@@ -1037,153 +1010,136 @@ compute_stats() {
 }
 
 # ==============================================================================
-# Formatting
+# Output
 # ==============================================================================
+# The recap carries raw commit subjects as bullets; summaries and rewritten
+# bullets are added by the git-recap agent skill.
 
-format_output() {
-    local commits="$1"
-    local summary="$2"
-    local bullets="$3"
-    local stats="$4"
-    local format="${ARG_FORMAT:-$DEFAULT_FORMAT}"
-    local mode="${ARG_MODE:-$DEFAULT_MODE}"
+# _wants <section> : true when the mode shows <section> (bullets or commits)
+_wants() { [[ "$ARG_MODE" == "$1" || "$ARG_MODE" == "all" ]]; }
 
-    case "$format" in
-        markdown) format_markdown "$commits" "$summary" "$mode" "$bullets" "$stats" ;;
-        json)     format_json "$commits" "$summary" "$mode" "$bullets" "$stats" ;;
-        *)        format_text "$commits" "$summary" "$mode" "$bullets" "$stats" ;;
-    esac
+# _subjects <rows> → commit subjects, one per line
+_subjects() { printf '%s\n' "$1" | cut -f2; }
+
+# _print_bullets <bullets> <prefix> : one prefixed line per bullet
+# (printf, not echo: a subject may be "-n" or "-e")
+_print_bullets() {
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && printf '%s%s\n' "$2" "$line"
+    done <<< "$1"
+    return 0
 }
 
-format_markdown() {
-    local commits="$1"
-    local summary="$2"
-    local mode="$3"
-    local bullets="$4"
-    local stats="$5"
-
-    echo "# Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL}"
-    echo ""
-
-    if [[ -n "$stats" ]]; then
-        local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
-        IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$stats"
-        echo "## Stats"
-        echo ""
-        echo "| Metric | Value |"
-        echo "|--------|-------|"
-        echo "| Total commits | ${total} |"
-        echo "| Active days | ${active_days:-0} |"
-        echo "| Avg per day | ${avg_per_day:-0.0} |"
-        echo "| Longest streak | ${longest_streak:-0} day(s) |"
-        echo "| First commit | ${first_date} |"
-        echo "| Last commit | ${last_date} |"
-        echo "| Busiest day | ${busiest_day} (${busiest_count} commits) |"
-        echo "| Busiest weekday | ${busiest_weekday:-N/A} |"
-        echo ""
-    fi
-
-    if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$summary" ]]; then
-        echo "## Summary"
-        echo ""
-        echo "$summary"
-        echo ""
-    fi
-
-    if [[ "$mode" == "bullets" || "$mode" == "all" ]]; then
-        if [[ -n "$bullets" ]]; then
-            echo "## Changes"
-            echo ""
-            _print_bullets "$bullets" "- "
-            echo ""
+# _print_commits_text <rows> <indent> : commits grouped under their date
+_print_commits_text() {
+    local indent="$2" hash msg date prev_date=""
+    while IFS=$'\t' read -r hash msg date; do
+        if [[ "$date" != "$prev_date" ]]; then
+            [[ -n "$prev_date" ]] && echo ""
+            printf '%s%s\n' "$indent" "$date"
+            prev_date="$date"
         fi
-    fi
-
-    if [[ "$mode" == "commits" || "$mode" == "all" ]]; then
-        if [[ -n "$commits" ]]; then
-            echo "## Commits"
-            echo ""
-            echo "| Date | Hash | Message |"
-            echo "|------|------|---------|"
-            echo "$commits" | while IFS=$'\t' read -r hash msg date; do
-                local commit_ref
-                commit_ref=$(_markdown_commit_ref "$hash")
-                echo "| ${date} | ${commit_ref} | ${msg//|/\\|} |"
-            done
-            echo ""
-        fi
-    fi
+        printf '%s  %s  %s\n' "$indent" "$hash" "$msg"
+    done <<< "$1"
 }
+
+# _print_commits_markdown <rows> : commit table; hashes link to the repository
+# when it has a web URL, and pipes are escaped so they stay inside their cell
+_print_commits_markdown() {
+    local hash msg date ref
+    echo "| Date | Hash | Message |"
+    echo "|------|------|---------|"
+    while IFS=$'\t' read -r hash msg date; do
+        ref="$hash"
+        [[ -n "$REPO_WEB_URL" ]] && ref="[${hash}](${REPO_WEB_URL}/commit/${hash})"
+        printf '| %s | %s | %s |\n' "$date" "$ref" "${msg//|/\\|}"
+    done <<< "$1"
+}
+
+# --- Single-user recap ---
 
 format_text() {
-    local commits="$1"
-    local summary="$2"
-    local mode="$3"
-    local bullets="$4"
-    local stats="$5"
+    local commits="$1" stats="$2"
+    local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
+    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$stats"
 
     echo "=== Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL} ==="
     echo ""
+    echo "--- Stats ---"
+    echo ""
+    echo "  Total commits:   ${total}"
+    echo "  Active days:     ${active_days:-0}"
+    echo "  Avg per day:     ${avg_per_day:-0.0}"
+    echo "  Longest streak:  ${longest_streak:-0} day(s)"
+    echo "  First commit:    ${first_date}"
+    echo "  Last commit:     ${last_date}"
+    echo "  Busiest day:     ${busiest_day} (${busiest_count} commits)"
+    echo "  Busiest weekday: ${busiest_weekday:-N/A}"
+    echo ""
 
-    if [[ -n "$stats" ]]; then
-        local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
-        IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$stats"
-        echo "--- Stats ---"
+    local bullets
+    bullets=$(_subjects "$commits")
+    if _wants bullets && [[ -n "$bullets" ]]; then
+        echo "--- Changes ---"
         echo ""
-        echo "  Total commits:   ${total}"
-        echo "  Active days:     ${active_days:-0}"
-        echo "  Avg per day:     ${avg_per_day:-0.0}"
-        echo "  Longest streak:  ${longest_streak:-0} day(s)"
-        echo "  First commit:    ${first_date}"
-        echo "  Last commit:     ${last_date}"
-        echo "  Busiest day:     ${busiest_day} (${busiest_count} commits)"
-        echo "  Busiest weekday: ${busiest_weekday:-N/A}"
-        echo ""
-    fi
-
-    if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$summary" ]]; then
-        echo "--- Summary ---"
-        echo ""
-        echo "$summary"
+        _print_bullets "$bullets" "  • "
         echo ""
     fi
 
-    if [[ "$mode" == "bullets" || "$mode" == "all" ]]; then
-        if [[ -n "$bullets" ]]; then
-            echo "--- Changes ---"
-            echo ""
-            _print_bullets "$bullets" "  • "
-            echo ""
-        fi
+    if _wants commits; then
+        echo "--- Commits ---"
+        echo ""
+        _print_commits_text "$commits" "  "
+        echo ""
+    fi
+}
+
+format_markdown() {
+    local commits="$1" stats="$2"
+    local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
+    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$stats"
+
+    echo "# Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL}"
+    echo ""
+    echo "## Stats"
+    echo ""
+    echo "| Metric | Value |"
+    echo "|--------|-------|"
+    echo "| Total commits | ${total} |"
+    echo "| Active days | ${active_days:-0} |"
+    echo "| Avg per day | ${avg_per_day:-0.0} |"
+    echo "| Longest streak | ${longest_streak:-0} day(s) |"
+    echo "| First commit | ${first_date} |"
+    echo "| Last commit | ${last_date} |"
+    echo "| Busiest day | ${busiest_day} (${busiest_count} commits) |"
+    echo "| Busiest weekday | ${busiest_weekday:-N/A} |"
+    echo ""
+
+    local bullets
+    bullets=$(_subjects "$commits")
+    if _wants bullets && [[ -n "$bullets" ]]; then
+        echo "## Changes"
+        echo ""
+        _print_bullets "$bullets" "- "
+        echo ""
     fi
 
-    if [[ "$mode" == "commits" || "$mode" == "all" ]]; then
-        if [[ -n "$commits" ]]; then
-            echo "--- Commits ---"
-            echo ""
-            local prev_date=""
-            echo "$commits" | while IFS=$'\t' read -r hash msg date; do
-                if [[ "$date" != "$prev_date" ]]; then
-                    [[ -n "$prev_date" ]] && echo ""
-                    echo "  ${date}"
-                    prev_date="$date"
-                fi
-                echo "    ${hash}  ${msg}"
-            done
-            echo ""
-        fi
+    if _wants commits; then
+        echo "## Commits"
+        echo ""
+        _print_commits_markdown "$commits"
+        echo ""
     fi
 }
 
 format_json() {
-    local commits="$1"
-    local mode="$3"
-    local stats="$5"
+    local commits="$1" stats="$2"
 
     # shellcheck disable=SC2016  # the $names below are jq variables
     printf '%s\n' "$commits" | jq -R -s \
         --slurpfile d "$DETAILS_FILE" \
-        --arg mode "$mode" \
+        --arg mode "$ARG_MODE" \
         --arg repo "$REPO_FULL" \
         --arg repo_name "$REPO_NAME" \
         --arg period "$PERIOD_LABEL" \
@@ -1207,9 +1163,29 @@ format_json() {
         || die "Could not build the JSON output"
 }
 
-# ==============================================================================
-# Team mode output
-# ==============================================================================
+# format_recap <rows> : single-user recap in the selected format
+format_recap() {
+    local commits="$1" stats
+    stats=$(compute_stats "$commits")
+    case "$ARG_FORMAT" in
+        markdown) format_markdown "$commits" "$stats" ;;
+        json)     format_json "$commits" "$stats" ;;
+        *)        format_text "$commits" "$stats" ;;
+    esac
+}
+
+# --- Team recap ---
+# Team rows carry the author in a fourth column.
+
+# _author_ranking <team rows> <total> → "count<TAB>percent<TAB>author" lines,
+# most commits first
+_author_ranking() {
+    printf '%s\n' "$1" | cut -f4 | sort | uniq -c | sort -rn | awk -v total="$2" '{
+        match($0, /^ *[0-9]+ /)
+        count = substr($0, 1, RLENGTH) + 0
+        printf "%d\t%.0f\t%s\n", count, (count / total) * 100, substr($0, RLENGTH + 1)
+    }'
+}
 
 # _author_commits <team rows> <author> → that author's rows, without the author
 # column. The name goes through the environment (awk -v would interpret its
@@ -1219,50 +1195,31 @@ _author_commits() {
         '($4 "") == (ENVIRON["AUTHOR"] "") { print $1, $2, $3 }'
 }
 
-_team_stats_text() {
-    local stats="$1" label="$2"
-    [[ -z "$stats" ]] && return
-    local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
-    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$stats"
-    echo "  ${label}"
-    echo "    Commits:        ${total}"
-    echo "    Active days:    ${active_days:-0}"
-    echo "    Avg per day:    ${avg_per_day:-0.0}"
-    echo "    Streak:         ${longest_streak:-0} day(s)"
-    echo "    Busiest day:    ${busiest_day} (${busiest_count})"
-    echo "    Busiest weekday: ${busiest_weekday:-N/A}"
+# _team_branch_label <label for all branches>
+_team_branch_label() {
+    if [[ "$ARG_ALL_BRANCHES" == true ]]; then
+        printf '%s' "$1"
+    else
+        printf '%s' "$BRANCH"
+    fi
 }
 
 output_team_text() {
     local all_commits="$1"
-    local mode="${ARG_MODE:-$DEFAULT_MODE}"
 
-    local authors
-    authors=$(echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | sed -E 's/^ *[0-9]+ //')
-    local num_authors
-    num_authors=$(echo "$authors" | wc -l | tr -d ' ')
-
-    local global_3f
-    global_3f=$(echo "$all_commits" | cut -f1-3)
-    local global_stats
-    global_stats=$(compute_stats "$global_3f")
     local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
-    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$global_stats"
-
-    local branch_label
-    if [[ "$ARG_ALL_BRANCHES" == true ]]; then
-        branch_label="all branches"
-    else
-        branch_label="$BRANCH"
-    fi
+    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak \
+        <<< "$(compute_stats "$all_commits")"
+    local ranking
+    ranking=$(_author_ranking "$all_commits" "$total")
 
     echo "=== Team Recap - ${REPO_NAME} - ${PERIOD_LABEL} ==="
     echo ""
     echo "--- Overview ---"
     echo ""
-    echo "  Contributors:    ${num_authors}"
+    echo "  Contributors:    $(printf '%s\n' "$ranking" | wc -l | tr -d ' ')"
     echo "  Total commits:   ${total}"
-    echo "  Branch:          ${branch_label}"
+    echo "  Branch:          $(_team_branch_label "all branches")"
     echo "  Active days:     ${active_days:-0}"
     echo "  Avg per day:     ${avg_per_day:-0.0}"
     echo "  Longest streak:  ${longest_streak:-0} day(s)"
@@ -1271,95 +1228,58 @@ output_team_text() {
     echo "  Busiest weekday: ${busiest_weekday:-N/A}"
     echo ""
 
-    # Top contributors ranking
+    local rank=0 count pct author
     echo "--- Contributors ---"
     echo ""
-    local rank=1
-    echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | while read -r cnt author; do
-        local pct
-        pct=$(awk "BEGIN {printf \"%.0f\", ($cnt / $total) * 100}")
-        printf '  %d. %-20s %3d commits (%s%%)\n' "$rank" "$author" "$cnt" "$pct"
+    while IFS=$'\t' read -r count pct author; do
         rank=$((rank + 1))
-    done
+        printf '  %d. %-20s %3d commits (%s%%)\n' "$rank" "$author" "$count" "$pct"
+    done <<< "$ranking"
     echo ""
 
-    # Per-author sections
-    while IFS= read -r author; do
+    local ac ac_bullets
+    local a_total a_busiest_day a_busiest_count a_active_days a_avg a_weekday a_streak
+    while IFS=$'\t' read -r count pct author; do
         [[ -z "$author" ]] && continue
-        local ac
         ac=$(_author_commits "$all_commits" "$author")
-        local ac_count
-        ac_count=$(echo "$ac" | wc -l | tr -d ' ')
+        IFS='|' read -r a_total _ _ a_busiest_day a_busiest_count a_active_days a_avg a_weekday a_streak \
+            <<< "$(compute_stats "$ac")"
 
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        printf '▶ %s (%d commits)\n' "$author" "$ac_count"
+        printf '▶ %s (%d commits)\n' "$author" "$count"
+        echo ""
+        echo "  Stats:"
+        echo "    Commits:        ${a_total}"
+        echo "    Active days:    ${a_active_days:-0}"
+        echo "    Avg per day:    ${a_avg:-0.0}"
+        echo "    Streak:         ${a_streak:-0} day(s)"
+        echo "    Busiest day:    ${a_busiest_day} (${a_busiest_count})"
+        echo "    Busiest weekday: ${a_weekday:-N/A}"
         echo ""
 
-        # Per-author stats (compact)
-        local ac_stats
-        ac_stats=$(compute_stats "$ac")
-        _team_stats_text "$ac_stats" "Stats:"
-        echo ""
-
-        # Raw content (summaries are written by the git-recap agent skill)
-        local ac_summary="" ac_bullets=""
-        USER_NAME="$author"
-        ac_bullets=$(raw_bullets "$ac")
-
-        if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$ac_summary" ]]; then
-            echo "  Summary:"
-            printf '%s\n' "${ac_summary//$'\n'/$'\n'    }" | sed 's/^/    /'
+        ac_bullets=$(_subjects "$ac")
+        if _wants bullets && [[ -n "$ac_bullets" ]]; then
+            echo "  Changes:"
+            _print_bullets "$ac_bullets" "    • "
             echo ""
         fi
 
-        if [[ "$mode" == "bullets" || "$mode" == "all" ]]; then
-            if [[ -n "$ac_bullets" ]]; then
-                echo "  Changes:"
-                _print_bullets "$ac_bullets" "    • "
-                echo ""
-            fi
+        if _wants commits; then
+            echo "  Commits:"
+            _print_commits_text "$ac" "    "
+            echo ""
         fi
-
-        if [[ "$mode" == "commits" || "$mode" == "all" ]]; then
-            if [[ -n "$ac" ]]; then
-                echo "  Commits:"
-                local prev_date=""
-                echo "$ac" | while IFS=$'\t' read -r hash msg date; do
-                    if [[ "$date" != "$prev_date" ]]; then
-                        [[ -n "$prev_date" ]] && echo ""
-                        echo "    ${date}"
-                        prev_date="$date"
-                    fi
-                    echo "      ${hash}  ${msg}"
-                done
-                echo ""
-            fi
-        fi
-    done <<< "$authors"
+    done <<< "$ranking"
 }
 
 output_team_markdown() {
     local all_commits="$1"
-    local mode="${ARG_MODE:-$DEFAULT_MODE}"
 
-    local authors
-    authors=$(echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | sed -E 's/^ *[0-9]+ //')
-    local num_authors
-    num_authors=$(echo "$authors" | wc -l | tr -d ' ')
-
-    local global_3f
-    global_3f=$(echo "$all_commits" | cut -f1-3)
-    local global_stats
-    global_stats=$(compute_stats "$global_3f")
     local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
-    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$global_stats"
-
-    local branch_label
-    if [[ "$ARG_ALL_BRANCHES" == true ]]; then
-        branch_label="all branches"
-    else
-        branch_label="$BRANCH"
-    fi
+    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak \
+        <<< "$(compute_stats "$all_commits")"
+    local ranking
+    ranking=$(_author_ranking "$all_commits" "$total")
 
     echo "# Team Recap - ${REPO_NAME} - ${PERIOD_LABEL}"
     echo ""
@@ -1367,9 +1287,9 @@ output_team_markdown() {
     echo ""
     echo "| Metric | Value |"
     echo "|--------|-------|"
-    echo "| Contributors | ${num_authors} |"
+    echo "| Contributors | $(printf '%s\n' "$ranking" | wc -l | tr -d ' ') |"
     echo "| Total commits | ${total} |"
-    echo "| Branch | ${branch_label} |"
+    echo "| Branch | $(_team_branch_label "all branches") |"
     echo "| Active days | ${active_days:-0} |"
     echo "| Avg per day | ${avg_per_day:-0.0} |"
     echo "| Longest streak | ${longest_streak:-0} day(s) |"
@@ -1378,36 +1298,27 @@ output_team_markdown() {
     echo "| Busiest weekday | ${busiest_weekday:-N/A} |"
     echo ""
 
-    # Contributors ranking
+    local rank=0 count pct author
     echo "## Contributors"
     echo ""
     echo "| # | Contributor | Commits | % |"
     echo "|---|-------------|---------|---|"
-    local rank=1
-    echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | while read -r cnt author; do
-        local pct
-        pct=$(awk "BEGIN {printf \"%.0f\", ($cnt / $total) * 100}")
-        echo "| ${rank} | ${author//|/\\|} | ${cnt} | ${pct}% |"
+    while IFS=$'\t' read -r count pct author; do
         rank=$((rank + 1))
-    done
+        echo "| ${rank} | ${author//|/\\|} | ${count} | ${pct}% |"
+    done <<< "$ranking"
     echo ""
 
-    # Per-author sections
-    while IFS= read -r author; do
+    local ac ac_bullets
+    local a_total a_busiest_day a_busiest_count a_active_days a_avg a_streak
+    while IFS=$'\t' read -r count pct author; do
         [[ -z "$author" ]] && continue
-        local ac
         ac=$(_author_commits "$all_commits" "$author")
-        local ac_count
-        ac_count=$(echo "$ac" | wc -l | tr -d ' ')
+        IFS='|' read -r a_total _ _ a_busiest_day a_busiest_count a_active_days a_avg _ a_streak \
+            <<< "$(compute_stats "$ac")"
 
-        echo "## ${author} (${ac_count} commits)"
+        echo "## ${author} (${count} commits)"
         echo ""
-
-        # Per-author stats
-        local ac_stats
-        ac_stats=$(compute_stats "$ac")
-        local a_total a_busiest_day a_busiest_count a_active_days a_avg a_streak
-        IFS='|' read -r a_total _ _ a_busiest_day a_busiest_count a_active_days a_avg _ a_streak <<< "$ac_stats"
         echo "| Metric | Value |"
         echo "|--------|-------|"
         echo "| Commits | ${a_total} |"
@@ -1417,61 +1328,32 @@ output_team_markdown() {
         echo "| Busiest day | ${a_busiest_day} (${a_busiest_count}) |"
         echo ""
 
-        # Raw content (summaries are written by the git-recap agent skill)
-        local ac_summary="" ac_bullets=""
-        USER_NAME="$author"
-        ac_bullets=$(raw_bullets "$ac")
-
-        if [[ ("$mode" == "summary" || "$mode" == "all") && -n "$ac_summary" ]]; then
-            echo "### Summary"
+        ac_bullets=$(_subjects "$ac")
+        if _wants bullets && [[ -n "$ac_bullets" ]]; then
+            echo "### Changes"
             echo ""
-            echo "$ac_summary"
+            _print_bullets "$ac_bullets" "- "
             echo ""
         fi
 
-        if [[ "$mode" == "bullets" || "$mode" == "all" ]]; then
-            if [[ -n "$ac_bullets" ]]; then
-                echo "### Changes"
-                echo ""
-                _print_bullets "$ac_bullets" "- "
-                echo ""
-            fi
+        if _wants commits; then
+            echo "### Commits"
+            echo ""
+            _print_commits_markdown "$ac"
+            echo ""
         fi
-
-        if [[ "$mode" == "commits" || "$mode" == "all" ]]; then
-            if [[ -n "$ac" ]]; then
-                echo "### Commits"
-                echo ""
-                echo "| Date | Hash | Message |"
-                echo "|------|------|---------|"
-                echo "$ac" | while IFS=$'\t' read -r hash msg date; do
-                    local commit_ref
-                    commit_ref=$(_markdown_commit_ref "$hash")
-                    echo "| ${date} | ${commit_ref} | ${msg//|/\\|} |"
-                done
-                echo ""
-            fi
-        fi
-    done <<< "$authors"
+    done <<< "$ranking"
 }
 
 output_team_json() {
     local all_commits="$1"
-    local mode="${ARG_MODE:-$DEFAULT_MODE}"
-
-    local branch_label
-    if [[ "$ARG_ALL_BRANCHES" == true ]]; then
-        branch_label="all"
-    else
-        branch_label="$BRANCH"
-    fi
 
     local global_stats
-    global_stats=$(compute_stats "$(echo "$all_commits" | cut -f1-3)")
+    global_stats=$(compute_stats "$all_commits")
 
     # Authors by commit count, and their stats in the same order
     local authors author
-    authors=$(echo "$all_commits" | cut -f4 | sort | uniq -c | sort -rn | sed -E 's/^ *[0-9]+ //')
+    authors=$(_author_ranking "$all_commits" "${global_stats%%|*}" | cut -f3-)
     printf '%s\n' "$authors" | jq -R 'select(length > 0)' > "$WORK_DIR/authors.json" \
         || die "Could not build the JSON output"
     while IFS= read -r author; do
@@ -1484,13 +1366,13 @@ output_team_json() {
         --slurpfile d "$DETAILS_FILE" \
         --slurpfile authors "$WORK_DIR/authors.json" \
         --slurpfile author_stats "$WORK_DIR/author_stats.json" \
-        --arg mode "$mode" \
+        --arg mode "$ARG_MODE" \
         --arg repo "$REPO_FULL" \
         --arg repo_name "$REPO_NAME" \
         --arg period "$PERIOD_LABEL" \
         --arg since "$SINCE" \
         --arg until "$UNTIL" \
-        --arg branch "$branch_label" \
+        --arg branch "$(_team_branch_label "all")" \
         --argjson stats "$(_stats_json "$global_stats")" \
         "$_JQ_RECAP"'
         rows as $rows | details as $m
@@ -1518,14 +1400,46 @@ output_team_json() {
         || die "Could not build the JSON output"
 }
 
-output_team() {
-    local all_commits="$1"
-    local format="${ARG_FORMAT:-$DEFAULT_FORMAT}"
+# format_team_recap <team rows> : team recap in the selected format
+format_team_recap() {
+    case "$ARG_FORMAT" in
+        markdown) output_team_markdown "$1" ;;
+        json)     output_team_json "$1" ;;
+        *)        output_team_text "$1" ;;
+    esac
+}
 
-    case "$format" in
-        text)     output_team_text "$all_commits" ;;
-        markdown) output_team_markdown "$all_commits" ;;
-        json)     output_team_json "$all_commits" ;;
+# --- Empty recap ---
+
+# format_empty_recap : what is printed when the period has no commits
+format_empty_recap() {
+    local title="Monthly Recap" for_user=" for ${USER_NAME}" for_user_md=" for **${USER_NAME}**"
+    if [[ "$ARG_TEAM" == true ]]; then
+        title="Team Recap" for_user="" for_user_md=""
+    fi
+
+    case "$ARG_FORMAT" in
+        markdown)
+            printf '# %s - %s - %s\n\nNo commits found%s during this period.\n\n' \
+                "$title" "$REPO_NAME" "$PERIOD_LABEL" "$for_user_md"
+            ;;
+        json)
+            # shellcheck disable=SC2016  # the $names below are jq variables
+            jq -n \
+                --arg repo "$REPO_FULL" \
+                --arg repo_name "$REPO_NAME" \
+                --arg period "$PERIOD_LABEL" \
+                --arg since "$SINCE" \
+                --arg until "$UNTIL" \
+                --arg user "$USER_NAME" \
+                --arg team "$ARG_TEAM" \
+                '{repo: $repo, repo_name: $repo_name, period: $period, since: $since, until: $until}
+                 + if $team == "true" then {team: true, contributors: []} else {user: $user, commits: []} end'
+            ;;
+        *)
+            printf '=== %s - %s - %s ===\n\nNo commits found%s during this period.\n\n' \
+                "$title" "$REPO_NAME" "$PERIOD_LABEL" "$for_user"
+            ;;
     esac
 }
 
@@ -1552,6 +1466,8 @@ main() {
     fi
 
     validate_args
+    ARG_MODE="${ARG_MODE:-$DEFAULT_MODE}"
+    ARG_FORMAT="${ARG_FORMAT:-$DEFAULT_FORMAT}"
 
     # Compute period (first: a bad period must fail before any network call)
     compute_period
@@ -1591,115 +1507,36 @@ main() {
     detect_default_branch
 
     # JSON output carries commit bodies (and changed files for local repos)
-    if [[ "${ARG_FORMAT:-$DEFAULT_FORMAT}" == "json" ]]; then
+    if [[ "$ARG_FORMAT" == "json" ]]; then
         DETAILS_FILE="$WORK_DIR/details.jsonl"
         : > "$DETAILS_FILE"
     fi
 
-    # === Team mode ===
+    # Fetch, then render. Each step runs in $(...): a failure there must stop
+    # the script instead of printing an empty recap.
+    local commits output
     if [[ "$ARG_TEAM" == true ]]; then
-        local all_commits
-        all_commits=$(fetch_commits team)
-
-        if [[ -z "$all_commits" ]]; then
-            local format="${ARG_FORMAT:-$DEFAULT_FORMAT}"
-            local output=""
-            case "$format" in
-                markdown) output="# Team Recap - ${REPO_NAME} - ${PERIOD_LABEL}
-
-No commits found during this period.
-" ;;
-                json) output=$(jq -n \
-                    --arg repo "$REPO_FULL" \
-                    --arg repo_name "$REPO_NAME" \
-                    --arg period "$PERIOD_LABEL" \
-                    --arg since "$SINCE" \
-                    --arg until "$UNTIL" \
-                    '{repo: $repo, repo_name: $repo_name, period: $period, since: $since, until: $until, team: true, contributors: []}') ;;
-                *) output="=== Team Recap - ${REPO_NAME} - ${PERIOD_LABEL} ===
-
-No commits found during this period.
-" ;;
-            esac
-            if [[ -n "$ARG_OUTPUT" ]]; then
-                echo "$output" > "$ARG_OUTPUT"
-                info "Output written to $ARG_OUTPUT"
-            else
-                echo "$output"
-            fi
-            exit 0
-        fi
-
-        local output
-        output=$(output_team "$all_commits")
-
-        if [[ -n "$ARG_OUTPUT" ]]; then
-            echo "$output" > "$ARG_OUTPUT"
-            info "Output written to $ARG_OUTPUT"
-        else
-            echo "$output"
-        fi
-        exit 0
+        commits=$(fetch_commits team) || exit 1
+    else
+        commits=$(fetch_commits) || exit 1
     fi
-
-    # === Single user mode ===
-    local commits
-    commits=$(fetch_commits)
 
     if [[ -z "$commits" ]]; then
-        local format="${ARG_FORMAT:-$DEFAULT_FORMAT}"
-        local output=""
-        case "$format" in
-            markdown)
-                output="# Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL}
-
-No commits found for **${USER_NAME}** during this period.
-"
-                ;;
-            json)
-                output=$(jq -n \
-                    --arg repo "$REPO_FULL" \
-                    --arg repo_name "$REPO_NAME" \
-                    --arg period "$PERIOD_LABEL" \
-                    --arg since "$SINCE" \
-                    --arg until "$UNTIL" \
-                    --arg user "$USER_NAME" \
-                    '{repo: $repo, repo_name: $repo_name, period: $period, since: $since, until: $until, user: $user, commits: []}')
-                ;;
-            *)
-                output="=== Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL} ===
-
-No commits found for ${USER_NAME} during this period.
-"
-                ;;
-        esac
-        if [[ -n "$ARG_OUTPUT" ]]; then
-            echo "$output" > "$ARG_OUTPUT"
-            info "Output written to $ARG_OUTPUT"
-        else
-            echo "$output"
-        fi
-        exit 0
+        output=$(format_empty_recap) || exit 1
+        # The text and markdown messages end with a blank line
+        [[ "$ARG_FORMAT" == "json" ]] || output+=$'\n'
+    elif [[ "$ARG_TEAM" == true ]]; then
+        output=$(format_team_recap "$commits") || exit 1
+    else
+        output=$(format_recap "$commits") || exit 1
     fi
-
-    # Compute stats
-    local stats
-    stats=$(compute_stats "$commits")
-
-    # Raw content (summaries are written by the git-recap agent skill)
-    local summary="" bullets=""
-    bullets=$(raw_bullets "$commits")
-
-    # Format output
-    local output
-    output=$(format_output "$commits" "$summary" "$bullets" "$stats")
 
     # Write or print
     if [[ -n "$ARG_OUTPUT" ]]; then
-        echo "$output" > "$ARG_OUTPUT"
+        printf '%s\n' "$output" > "$ARG_OUTPUT"
         info "Output written to $ARG_OUTPUT"
     else
-        echo "$output"
+        printf '%s\n' "$output"
     fi
 }
 
