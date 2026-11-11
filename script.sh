@@ -176,7 +176,12 @@ _collect_local_details() {
             hash: $p[0],
             body: ($p[1] | sub("^\\s+"; "") | sub("\\s+$"; "")),
             files: [($p[2] // "") | split("\n")[] | split("\t") | select(length >= 3)
-                | {path: (.[2:] | join("\t")), additions: (.[0] | tonumber? // 0), deletions: (.[1] | tonumber? // 0)}]
+                | {path: (.[2:] | join("\t")
+                    | if test(" => ") then
+                        (if test("\\{") then sub("\\{[^}]* => (?<new>[^}]*)\\}"; "\(.new)") | gsub("//"; "/")
+                         else sub("^.* => "; "") end)
+                      else . end),
+                   additions: (.[0] | tonumber? // 0), deletions: (.[1] | tonumber? // 0)}]
         }
         | .additions = ([.files[].additions] | add // 0)
         | .deletions = ([.files[].deletions] | add // 0)' >> "$DETAILS_FILE" \
@@ -435,6 +440,17 @@ parse_args() {
                 ARG_REPO="$1"; shift ;;
         esac
     done
+}
+
+# Options that are accepted but have no effect in this combination
+warn_ignored_args() {
+    if [[ "$ARG_TEAM" == false && -n "$ARG_EXCLUDE_AUTHORS" ]]; then
+        warn "--exclude-author only applies to --team recaps: ignored"
+    fi
+    if [[ "$ARG_ALL_BRANCHES" == true && -n "$ARG_BRANCH" ]]; then
+        warn "-b/--branch is ignored with --all-branches"
+    fi
+    return 0
 }
 
 validate_args() {
@@ -810,7 +826,8 @@ _fetch_local() {
     local row_format='%h%x1f%s%x1f%as%x1f%aN'
     if [[ "$mode" != "team" ]]; then
         row_format='%h%x1f%s%x1f%as'
-        git_args+=(--author="$USER_NAME")
+        # --fixed-strings: a name such as "dependabot[bot]" is not a regex
+        git_args+=(--author="$USER_NAME" --fixed-strings)
     fi
     git_args+=(--no-merges)
     [[ -n "$SINCE" ]] && git_args+=(--since="$SINCE")
@@ -864,10 +881,17 @@ _github_get() {
 _github_get_curl() {
     local url="https://api.github.com/$1" filter="$2" status
     local body="$WORK_DIR/curl.body" headers="$WORK_DIR/curl.headers"
+    local auth="$WORK_DIR/curl.auth" token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    # The token goes through a header file, so that it never shows in ps
+    if [[ -n "$token" ]]; then
+        (umask 077; printf 'Authorization: Bearer %s\n' "$token" > "$auth")
+    else
+        : > "$auth"
+    fi
     while [[ -n "$url" ]]; do
         # -g: brackets in a URL are data, not a glob
         if ! status=$(curl -sS -g -L -o "$body" -D "$headers" -w '%{http_code}' \
-            -H "Accept: application/vnd.github+json" "$url" 2>"$WORK_DIR/api.err"); then
+            -H "Accept: application/vnd.github+json" -H "@$auth" "$url" 2>"$WORK_DIR/api.err"); then
             _github_die "$(cat "$WORK_DIR/api.err")"
         fi
         case "$status" in
@@ -1466,6 +1490,7 @@ main() {
     fi
 
     validate_args
+    warn_ignored_args
     ARG_MODE="${ARG_MODE:-$DEFAULT_MODE}"
     ARG_FORMAT="${ARG_FORMAT:-$DEFAULT_FORMAT}"
 

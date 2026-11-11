@@ -710,6 +710,27 @@ assert_contains "markdown lists keep the raw subject" "$out" '- feat: support a|
 out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m commits -u "Pipe" "$reg_dir/pipes" 2>/dev/null)
 assert_contains "text output keeps pipes as they are" "$out" 'feat: support a|b syntax'
 
+# -u is matched literally, not as a regex
+out=$(HOME="$reg_home" "$GIT_RECAP" --all-commits -f json -p all -u "dependabot[bot]" "$reg_dir/odd" 2>/dev/null)
+assert_eq "-u with brackets matches the literal author" "1" "$(echo "$out" | jq '.commits | length')"
+
+# Options that have no effect are reported
+err=$(HOME="$reg_home" "$GIT_RECAP" --exclude-author "x*" -p all -u "Recap Tester" "$reg_repo" 2>&1 >/dev/null)
+assert_contains "--exclude-author without --team warns" "$err" "--exclude-author only applies to --team"
+err=$(HOME="$reg_home" "$GIT_RECAP" --all-branches -b main -p all -u "Recap Tester" "$reg_repo" 2>&1 >/dev/null)
+assert_contains "-b with --all-branches warns" "$err" "-b/--branch is ignored with --all-branches"
+
+# Renamed files are reported under their new path
+_reg_init "$reg_dir/rename"
+mkdir -p "$reg_dir/rename/src/old"
+printf 'a\nb\nc\nd\n' > "$reg_dir/rename/src/old/file.txt"
+printf 'x\n' > "$reg_dir/rename/top.txt"
+git -C "$reg_dir/rename" add . && git -C "$reg_dir/rename" commit -q -m "feat: add files"
+git -C "$reg_dir/rename" mv src/old src/new
+git -C "$reg_dir/rename" mv top.txt moved.txt
+git -C "$reg_dir/rename" commit -q -m "refactor: rename"
+out=$(HOME="$reg_home" "$GIT_RECAP" -f json -p all -u "Recap Tester" "$reg_dir/rename" 2>/dev/null)
+assert_eq "renamed paths keep their new name" "moved.txt,src/new/file.txt" "$(echo "$out" | jq -r '[.commits[0].files[].path] | sort | join(",")')"
 # A subject that looks like an echo option is still printed
 _reg_init "$reg_dir/dash"
 _reg_commit "$reg_dir/dash" 2025-01-12 "Recap Tester" "-n"
@@ -930,11 +951,13 @@ done
 cat > "$nogh_bin/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
 body=/dev/null headers=/dev/null url=""
+[[ -n "${CURL_MOCK_ARGV:-}" ]] && printf '%s\n' "$*" >> "$CURL_MOCK_ARGV"
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -H) [[ "$2" == @* && -n "${CURL_MOCK_HEADERS:-}" ]] && cat "${2#@}" >> "$CURL_MOCK_HEADERS"; shift 2 ;;
         -o) body="$2"; shift 2 ;;
         -D) headers="$2"; shift 2 ;;
-        -w|-H) shift 2 ;;
+        -w) shift 2 ;;
         -*) shift ;;
         *) url="$1"; shift ;;
     esac
@@ -992,6 +1015,17 @@ assert_eq "--init at end of input keeps the defaults" 'GIT_RECAP_USER="recaptest
     "$(grep -v '^#' "$reg_dir/inithome/.git-recaprc" | tr '\n' '|' | sed 's/|$//')"
 err=$(PATH="$nogh_bin" HOME="$reg_dir/inithome" "$GIT_RECAP" --init </dev/null 2>&1)
 assert_contains "--init at end of input without a detectable user says why it stops" "$err" "Username is required"
+
+# curl fallback authenticates with GH_TOKEN, without putting it on the command line
+rm -f "$reg_dir/curl.argv" "$reg_dir/curl.headers"
+GH_TOKEN="secret-token-123" CURL_MOCK_ARGV="$reg_dir/curl.argv" CURL_MOCK_HEADERS="$reg_dir/curl.headers" \
+    _curl_run -p all -u recaptester mock/repo >/dev/null 2>&1
+assert_contains "curl fallback sends GH_TOKEN" "$(cat "$reg_dir/curl.headers")" "Authorization: Bearer secret-token-123"
+assert_not_contains "curl fallback keeps the token off the command line" "$(cat "$reg_dir/curl.argv")" "secret-token-123"
+rm -f "$reg_dir/curl.headers"
+env -u GH_TOKEN -u GITHUB_TOKEN CURL_MOCK_HEADERS="$reg_dir/curl.headers" \
+    PATH="$nogh_bin" HOME="$reg_home" "$GIT_RECAP" -p all -u recaptester mock/repo >/dev/null 2>&1
+assert_not_contains "curl fallback sends no token when none is set" "$(cat "$reg_dir/curl.headers" 2>/dev/null)" "Authorization"
 
 # Team mode with a bare repo name needs a user to build owner/repo
 err=$(_curl_run --team -p all barename 2>&1 >/dev/null)
