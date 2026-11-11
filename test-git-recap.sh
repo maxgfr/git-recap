@@ -6,6 +6,10 @@
 
 set -uo pipefail
 
+# The tests build their own repositories and identities
+unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL \
+    GIT_COMMITTER_DATE GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GH_TOKEN GITHUB_TOKEN
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="${SCRIPT_DIR}/script.sh"
 cli_dir=$(mktemp -d /tmp/git-recap-cli.XXXXXX)
@@ -99,6 +103,7 @@ assert_exit() {
 #   GH_MOCK_STDERR          line printed on stderr by every api call
 #   GH_MOCK_AUTH_RC         exit code of `gh auth status` (default: 0); when not 0,
 #                           api calls fail like a logged-out gh
+#   GH_MOCK_LOGIN           login returned by `gh api user` (default: recaptester)
 #   GH_MOCK_NETFAIL         every call fails as if GitHub were unreachable
 #   GH_MOCK_LOG             file receiving one line per gh invocation
 # A fixture named commits-<branch>.json next to the mock is served for sha=<branch>.
@@ -134,7 +139,7 @@ if [[ -n "${GH_MOCK_FAIL:-}" && "$path" == *"${GH_MOCK_FAIL_ON:-}"* ]]; then
     exit 1
 fi
 case "$path" in
-    user) printf '%s\n' '{"login":"recaptester"}' | jq -r "$filter" ;;
+    user) jq -n -r --arg l "${GH_MOCK_LOGIN:-recaptester}" '{login: $l}' | jq -r "$filter" ;;
     *"/branches"*)
         if [[ -n "${GH_MOCK_BRANCHES:-}" ]]; then
             jq -r "$filter" "$GH_MOCK_BRANCHES"
@@ -728,13 +733,37 @@ assert_contains "text output keeps pipes as they are" "$out" 'feat: support a|b 
 _reg_init "$reg_dir/accents"
 _reg_commit "$reg_dir/accents" 2025-01-10 "Élodie Été" "feat: one"
 _reg_commit "$reg_dir/accents" 2025-01-11 "Recap Tester" "feat: two"
-if locale -a 2>/dev/null | grep -qiE '^en_US\.utf-?8$'; then
+# (not `locale -a | grep -q`: grep closing the pipe early makes locale die of
+# SIGPIPE, and under pipefail the check failed and the tests were skipped)
+utf8_locales=$(locale -a 2>/dev/null || true)
+has_en_utf8=no
+while IFS= read -r utf8_locale; do
+    case "$utf8_locale" in en_US.UTF-8|en_US.utf8) has_en_utf8=yes ;; esac
+done <<< "$utf8_locales"
+if [[ "$has_en_utf8" == yes ]]; then
     out=$(HOME="$reg_home" LC_ALL=en_US.UTF-8 "$GIT_RECAP" --team --exclude-author "?lodie*" -f json -p all "$reg_dir/accents" 2>/dev/null)
     assert_eq "--exclude-author ? matches an accented letter" "Recap Tester" "$(echo "$out" | jq -r '[.contributors[].user] | join(",")')"
     out=$(HOME="$reg_home" LC_ALL=en_US.UTF-8 "$GIT_RECAP" --team --exclude-author "élodie*" -f json -p all "$reg_dir/accents" 2>/dev/null)
     assert_eq "--exclude-author folds accented capitals" "Recap Tester" "$(echo "$out" | jq -r '[.contributors[].user] | join(",")')"
 else
     echo "  SKIP: en_US.UTF-8 locale not installed, skipping accented --exclude-author tests"
+fi
+
+# One author that is not valid UTF-8 does not stop accent folding for the others
+_reg_init "$reg_dir/mixed"
+{
+    printf 'commit refs/heads/main\nmark :1\n'
+    printf 'author Fran\347ois <f@example.invalid> 1736510400 +0000\n'
+    printf 'committer Fran\347ois <f@example.invalid> 1736510400 +0000\n'
+    printf 'data 10\nfeat: one\n'
+    printf 'commit refs/heads/main\nmark :2\n'
+    printf 'author ZO\303\213 Q <z@example.invalid> 1736596800 +0000\n'
+    printf 'committer ZO\303\213 Q <z@example.invalid> 1736596800 +0000\n'
+    printf 'data 10\nfeat: two\nfrom :1\n'
+} | git -C "$reg_dir/mixed" fast-import --quiet
+if [[ "$has_en_utf8" == yes ]]; then
+    out=$(HOME="$reg_home" LC_ALL=en_US.UTF-8 "$GIT_RECAP" --team --exclude-author "zoë*" -p all "$reg_dir/mixed" 2>/dev/null)
+    assert_contains "accent folding survives a non-UTF-8 author" "$out" "Contributors:    1"
 fi
 
 # Options without a value exit 1 (Bash 3.2 used to exit 0)
@@ -901,11 +930,37 @@ out=$(HOME="$reg_home" "$GIT_RECAP" --all-branches -p all -m commits -u "Recap T
 assert_contains "--all-branches lists commits of a detached HEAD" "$out" "feat: detached work"
 git -C "$reg_dir/stash" checkout -q main
 
+# -b must name commits: a tree or a blob is rejected instead of an empty recap
+assert_exit "-b with a tree exits 1" 1 env HOME="$reg_home" "$GIT_RECAP" -b 'HEAD^{tree}' -p all -u "Recap Tester" "$reg_dir/stash"
+assert_exit "-b with a blob exits 1" 1 env HOME="$reg_home" "$GIT_RECAP" -b 'HEAD:tracked.txt' -p all -u "Recap Tester" "$reg_dir/stash"
+assert_exit "-b with a range to an unknown end exits 1" 1 env HOME="$reg_home" "$GIT_RECAP" -b 'main..nope' -p all -u "Recap Tester" "$reg_dir/stash"
+
 # -b accepts any revision, ranges included
 _reg_commit "$reg_dir/stash" 2025-02-02 "Recap Tester" "feat: second on main"
 out=$(HOME="$reg_home" "$GIT_RECAP" -b "main~1..main" -p all -m commits -u "Recap Tester" "$reg_dir/stash" 2>/dev/null)
 assert_contains "-b with a range lists its commits" "$out" "feat: second on main"
 assert_not_contains "-b with a range stops at its start" "$out" "feat: tracked file"
+
+# File names with control characters, leading newlines or tabs are kept as they are
+_reg_init "$reg_dir/ctrl"
+{
+    printf 'commit refs/heads/main\nmark :1\n'
+    printf 'author Recap Tester <recap@example.invalid> 1736510400 +0000\n'
+    printf 'committer Recap Tester <recap@example.invalid> 1736510400 +0000\n'
+    printf 'data 10\nfeat: one\n'
+    printf 'M 100644 inline "rs\\036name.txt"\ndata 2\na\n'
+    printf 'M 100644 inline "us\\037name.txt"\ndata 2\nb\n'
+    printf 'M 100644 inline "tab\\tname.txt"\ndata 2\nc\n'
+    printf 'commit refs/heads/main\nmark :2\n'
+    printf 'author Recap Tester <recap@example.invalid> 1736596800 +0000\n'
+    printf 'committer Recap Tester <recap@example.invalid> 1736596800 +0000\n'
+    printf 'data 10\nfeat: two\nfrom :1\n'
+    printf 'R "us\\037name.txt" "\\nlead.txt"\n'
+} | git -C "$reg_dir/ctrl" fast-import --quiet
+out=$(HOME="$reg_home" "$GIT_RECAP" -f json -p all -u "Recap Tester" "$reg_dir/ctrl" 2>/dev/null)
+assert_eq "control characters in file names are kept" '["rs\u001ename.txt","tab\tname.txt","us\u001fname.txt"]' \
+    "$(echo "$out" | jq -c '[.commits[1].files[].path] | sort')"
+assert_eq "a rename to a name starting with a newline keeps it" '"\nlead.txt"' "$(echo "$out" | jq -c '.commits[0].files[0].path')"
 
 # Changed files keep non-ASCII names readable
 printf 'x\n' > "$reg_dir/stash/数据.txt"
@@ -965,6 +1020,14 @@ assert_contains "failed user lookup is reported" "$err" "Could not detect GitHub
 assert_not_contains "failed user lookup does not leak the error body" "$err" "Mock failure"
 err=$(GH_MOCK_FAIL=401 GH_MOCK_FAIL_ON=user _mock_run --team -p all barename 2>&1 >/dev/null)
 assert_contains "team bare name with a failed user lookup says why" "$err" "without a GitHub user"
+
+# Logins with an underscore (Enterprise Managed Users) are accepted
+out=$(GH_MOCK_LOGIN="mona_octo" _mock_run -p all mock/repo 2>&1 >/dev/null)
+assert_contains "login with an underscore is detected" "$out" "User: mona_octo"
+
+# A 401 with GH_TOKEN set points at the token
+err=$(GH_TOKEN=revoked GH_MOCK_FAIL=401 _mock_run -p all -u recaptester mock/repo 2>&1 >/dev/null)
+assert_contains "401 with GH_TOKEN set points at the token" "$err" "Check GH_TOKEN"
 
 # A network failure shows the real error, not only an authentication hint
 err=$(GH_MOCK_NETFAIL=1 _mock_run -p all -u recaptester mock/repo 2>&1 >/dev/null)

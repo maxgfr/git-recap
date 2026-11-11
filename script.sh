@@ -176,30 +176,36 @@ _split_details() {
 # _collect_local_details <git log args...> : records body + numstat per commit
 _collect_local_details() {
     [[ -n "$DETAILS_FILE" ]] || return 0
-    # -z: entries end with NUL and a rename is "adds<TAB>dels<TAB>\0old\0new\0",
-    # so file names are taken verbatim (no quoting, no "old => new" to parse)
-    git -C "$LOCAL_REPO_DIR" log "$@" --numstat -z --format='%x1e%h%x1f%b%x1f' -- | jq -R -s -c '
-        # NUL-separated numstat tokens -> [{path, additions, deletions}]
-        def numstat:
-            split("\u0000") | map(ltrimstr("\n")) as $t
-            | reduce range(0; $t | length) as $i ({skip: 0, files: []};
-                if .skip > 0 then
-                    (if .skip == 1 then .files[-1].path = $t[$i] else . end) | .skip -= 1
-                else
-                    ($t[$i] | split("\t")) as $f
-                    | if ($f | length) >= 3 then
-                        .files += [{path: ($f[2:] | join("\t")),
-                                    additions: ($f[0] | tonumber? // 0), deletions: ($f[1] | tonumber? // 0)}]
-                        | if ($f[2:] | join("\t")) == "" then .skip = 2 else . end
-                      else . end
-                end)
-            | .files;
-        split("\u001e") | .[1:][] | split("\u001f") as $p
-        | {
-            hash: $p[0],
-            body: ($p[1] | sub("^\\s+"; "") | sub("\\s+$"; "")),
-            files: (($p[2] // "") | numstat)
-        }
+    # With -z every field ends with NUL, the one byte a file name cannot hold:
+    #   NUL <marker> NUL <hash> NUL <body> NUL [\n] <adds> TAB <dels> TAB <path> NUL ...
+    # and a rename is "<adds> TAB <dels> TAB NUL <old> NUL <new> NUL".
+    # The marker carries a random part so that no file name can pass for it.
+    local marker="git-recap-commit-${RANDOM}${RANDOM}-$$"
+    git -C "$LOCAL_REPO_DIR" log "$@" --numstat -z --format="%x00${marker}%x00%h%x00%b" -- \
+        | jq -R -s -c --arg marker "$marker" '
+        def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
+        # One linear pass over the NUL-separated tokens. Emits {c, h, body} for
+        # each commit header and {c, f} for each changed file (c = commit index).
+        [foreach (split("\u0000")[]) as $tok ({c: 0, st: "skip"};
+            if $tok == $marker then {c: (.c + 1), st: "hash", out: null}
+            elif .st == "hash" then .h = $tok | .st = "body" | .out = null
+            elif .st == "body" then .st = "stat" | .out = {c, h, body: ($tok | trim)}
+            elif .st == "old" then .st = "new" | .out = null
+            elif .st == "new" then .st = "stat" | .out = {c, f: (.pending | .path = $tok)}
+            elif .st == "stat" then
+                ($tok | ltrimstr("\n") | split("\t")) as $f
+                | if ($f | length) >= 3 then
+                    {path: ($f[2:] | join("\t")),
+                     additions: ($f[0] | tonumber? // 0), deletions: ($f[1] | tonumber? // 0)} as $e
+                    | if $e.path == "" then .pending = $e | .st = "old" | .out = null
+                      else .out = {c, f: $e} end
+                  else .out = null end
+            else .out = null end;
+            .out // empty)] as $items
+        | ($items | map(select(has("f"))) | group_by(.c)
+            | map({key: (.[0].c | tostring), value: map(.f)}) | from_entries) as $files
+        | $items[] | select(has("h"))
+        | {hash: .h, body: .body, files: ($files[.c | tostring] // [])}
         | .additions = ([.files[].additions] | add // 0)
         | .deletions = ([.files[].deletions] | add // 0)' >> "$DETAILS_FILE" \
         || die "Could not read commit details from $LOCAL_REPO_DIR"
@@ -288,9 +294,18 @@ _lowercase() {
     # Bash 3.2 (macOS): BSD tr folds multibyte letters
     local text out
     text=$(cat)
-    out=$(printf '%s\n' "$text" | LC_ALL="$MATCH_LOCALE" tr '[:upper:]' '[:lower:]' 2>/dev/null) \
-        || out=$(printf '%s\n' "$text" | tr '[:upper:]' '[:lower:]')
-    printf '%s\n' "$out"
+    if out=$(printf '%s\n' "$text" | LC_ALL="$MATCH_LOCALE" tr '[:upper:]' '[:lower:]' 2>/dev/null); then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    # Some line is not valid in the locale: fold line by line, byte-wise only
+    # where needed (rare: this forks per line)
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        out=$(printf '%s\n' "$line" | LC_ALL="$MATCH_LOCALE" tr '[:upper:]' '[:lower:]' 2>/dev/null) \
+            || out=$(printf '%s\n' "$line" | tr '[:upper:]' '[:lower:]')
+        printf '%s\n' "$out"
+    done <<< "$text"
 }
 
 # _glob_match <text> <glob> : glob match in the user's locale, so that "?"
@@ -377,11 +392,11 @@ Usage:
                           written by the git-recap agent skill)
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
-  -b, --branch <branch>   Branch (default: auto-detected)
+  -b, --branch <branch>   Branch or revision, e.g. main~10..main (default: auto-detected)
   --since <YYYY-MM-DD>    Start date (inclusive), instead of -p
   --until <YYYY-MM-DD>    End date (inclusive), instead of -p
   --team                  Team mode: recap for all contributors grouped by author
-  --all-branches          Fetch commits from all branches (not just default/specified)
+  --all-branches          Fetch commits from all branches, tags and HEAD
   --exclude-author <glob> Skip commits from matching authors in team mode
                           (case-insensitive, repeatable, e.g. "*bot*")
   --all-commits           Keep bot authors and release commits (skipped by default)
@@ -554,7 +569,7 @@ config_load() {
 detect_github_user() {
     local login
     if command -v gh &>/dev/null && login=$(gh api user --jq '.login' 2>/dev/null </dev/null); then
-        [[ "$login" =~ ^[A-Za-z0-9-]+$ ]] && printf '%s\n' "$login"
+        [[ "$login" =~ ^[A-Za-z0-9_-]+$ ]] && printf '%s\n' "$login"
     fi
     return 0
 }
@@ -757,10 +772,19 @@ resolve_repo() {
     info "Repo: ${REPO_FULL}${via}"
 }
 
-# _local_ref_exists <revision> : true when <revision> (a ref, main~3, a range)
-# resolves in the local repo
+# _local_ref_exists <revision> : true when <revision> names a commit of the
+# local repo (a ref, main~3), or is a range whose ends are commits (a..b, a...b)
 _local_ref_exists() {
-    git -C "$LOCAL_REPO_DIR" rev-parse --quiet "$1" -- >/dev/null 2>&1
+    local rev="$1" end
+    if [[ "$rev" == *..* ]]; then
+        local ends="${rev/.../..}"
+        for end in "${ends%%..*}" "${ends#*..}"; do
+            # An empty end means HEAD (main.. is main..HEAD)
+            git -C "$LOCAL_REPO_DIR" rev-parse --verify --quiet "${end:-HEAD}^{commit}" >/dev/null 2>&1 || return 1
+        done
+        return 0
+    fi
+    git -C "$LOCAL_REPO_DIR" rev-parse --verify --quiet "${rev}^{commit}" >/dev/null 2>&1
 }
 
 detect_default_branch() {
@@ -890,7 +914,9 @@ _github_die() {
     [[ "$err" =~ \(HTTP\ ([0-9]{3})\) ]] && status="${BASH_REMATCH[1]}"
     case "$status" in
         401)
-            command -v gh &>/dev/null || die "GitHub rejected the credentials. Check GH_TOKEN / GITHUB_TOKEN"
+            if ! command -v gh &>/dev/null || [[ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]]; then
+                die "GitHub rejected the credentials. Check GH_TOKEN / GITHUB_TOKEN"
+            fi
             die "GitHub rejected the credentials. Run: gh auth login" ;;
         403|429) die "Access denied (rate limit or permissions): ${REPO_FULL}" ;;
         404)
@@ -924,7 +950,8 @@ _github_get() {
     [[ -z "$out" ]] || printf '%s\n' "$out"
 }
 
-# curl backend of _github_get: unauthenticated, follows Link rel="next" pages
+# curl backend of _github_get: authenticated with GH_TOKEN / GITHUB_TOKEN when
+# set, follows Link rel="next" pages
 _github_get_curl() {
     local url="https://api.github.com/$1" filter="$2" status
     local body="$WORK_DIR/curl.body" headers="$WORK_DIR/curl.headers"

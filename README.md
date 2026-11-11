@@ -62,11 +62,11 @@ Options:
                           (bullets are raw commit messages; summaries come from the skill)
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
-  -b, --branch <branch>   Branch (default: auto-detected)
+  -b, --branch <branch>   Branch or revision, e.g. main~10..main (default: auto-detected)
   --since <YYYY-MM-DD>    Start date (inclusive), instead of -p
   --until <YYYY-MM-DD>    End date (inclusive), instead of -p
   --team                  Team mode: all contributors, grouped by author
-  --all-branches          Fetch commits from all branches
+  --all-branches          Fetch commits from all branches, tags and HEAD
   --exclude-author <glob> Skip matching authors in team mode (repeatable, case-insensitive)
   --all-commits           Keep bot authors and release commits (skipped by default)
   --init                  Initialize configuration
@@ -97,7 +97,7 @@ Weeks run Monday to Sunday. Invalid periods and dates (`-p 2026-13`, `--since 20
 
 Merge commits, bot authors (`*[bot]`, `*-bot`, such as `dependabot[bot]` or `semantic-release-bot`) and release commits (`chore(release): …`, bare version numbers) are skipped by default. The number of skipped commits is reported on stderr. Use `--all-commits` to keep them, and `--exclude-author "<name or glob>"` to leave specific people out of a team recap (a literal name such as `dependabot[bot]` works too).
 
-For local repositories, `-u` is matched against author names and emails as a plain substring; for GitHub repositories it is a GitHub login or email. `--all-branches` reads local branches, remote-tracking branches and tags (not the stash).
+For local repositories, `-u` is matched against author names and emails as a plain substring; for GitHub repositories it is a GitHub login or email. `--all-branches` reads local branches, remote-tracking branches, tags and HEAD (not the stash). For local repositories, `-b` also takes any revision or range (`main~10..main`).
 
 ### Team Mode
 
