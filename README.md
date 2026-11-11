@@ -97,7 +97,7 @@ Weeks run Monday to Sunday. Invalid periods and dates (`-p 2026-13`, `--since 20
 
 Merge commits, bot authors (`*[bot]`, `*-bot`, such as `dependabot[bot]` or `semantic-release-bot`) and release commits (`chore(release): …`, bare version numbers) are skipped by default. The number of skipped commits is reported on stderr. Use `--all-commits` to keep them, and `--exclude-author "<name or glob>"` to leave specific people out of a team recap (a literal name such as `dependabot[bot]` works too).
 
-`-u` is matched against author names and emails as a plain substring. `--all-branches` reads local branches, remote-tracking branches and tags (not the stash).
+For local repositories, `-u` is matched against author names and emails as a plain substring; for GitHub repositories it is a GitHub login or email. `--all-branches` reads local branches, remote-tracking branches and tags (not the stash).
 
 ### Team Mode
 

@@ -7,7 +7,11 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GIT_RECAP="${SCRIPT_DIR}/script.sh"
+SCRIPT="${SCRIPT_DIR}/script.sh"
+cli_dir=$(mktemp -d /tmp/git-recap-cli.XXXXXX)
+printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH" "$SCRIPT" > "$cli_dir/git-recap"
+chmod +x "$cli_dir/git-recap"
+GIT_RECAP="$cli_dir/git-recap"
 
 PASS=0
 FAIL=0
@@ -95,6 +99,7 @@ assert_exit() {
 #   GH_MOCK_STDERR          line printed on stderr by every api call
 #   GH_MOCK_AUTH_RC         exit code of `gh auth status` (default: 0); when not 0,
 #                           api calls fail like a logged-out gh
+#   GH_MOCK_NETFAIL         every call fails as if GitHub were unreachable
 #   GH_MOCK_LOG             file receiving one line per gh invocation
 # A fixture named commits-<branch>.json next to the mock is served for sha=<branch>.
 
@@ -104,6 +109,10 @@ cat > "$mock_dir/bin/gh" <<'MOCK_GH'
 #!/usr/bin/env bash
 dir="$(cd "$(dirname "$0")/.." && pwd)"
 [[ -n "${GH_MOCK_LOG:-}" ]] && printf '%s\n' "$1 ${2:-}" >> "$GH_MOCK_LOG"
+if [[ -n "${GH_MOCK_NETFAIL:-}" ]]; then
+    printf '%s\n' "error connecting to api.github.com" >&2
+    exit 1
+fi
 [[ "$1" == "auth" ]] && exit "${GH_MOCK_AUTH_RC:-0}"
 [[ "$1" == "api" ]] || exit 1
 if [[ "${GH_MOCK_AUTH_RC:-0}" -ne 0 ]]; then
@@ -170,7 +179,10 @@ echo ""
 
 # Source the script without set -e and without running main
 _GR_TMP=$(mktemp)
-sed -e '/^set -euo pipefail$/d' -e '/^main "\$@"$/d' "$GIT_RECAP" > "$_GR_TMP"
+sed -e '/^set -euo pipefail$/d' -e '/^main "\$@"$/d' "$SCRIPT" > "$_GR_TMP"
+# Sourcing exports LC_ALL=C, the locale the script's functions run in: unit
+# tests keep it, CLI tests get the caller's locale back (see "CLI basics")
+_GR_LC_ALL="${LC_ALL-__unset__}"
 # shellcheck disable=SC1090
 source "$_GR_TMP"
 rm -f "$_GR_TMP"
@@ -323,6 +335,8 @@ echo ""
 # ==============================================================================
 # Integration tests
 # ==============================================================================
+
+if [[ "$_GR_LC_ALL" == "__unset__" ]]; then unset LC_ALL; else export LC_ALL="$_GR_LC_ALL"; fi
 
 echo "$(_bold "CLI basics")"
 
@@ -710,6 +724,24 @@ assert_contains "markdown lists keep the raw subject" "$out" '- feat: support a|
 out=$(HOME="$reg_home" "$GIT_RECAP" -p all -m commits -u "Pipe" "$reg_dir/pipes" 2>/dev/null)
 assert_contains "text output keeps pipes as they are" "$out" 'feat: support a|b syntax'
 
+# --exclude-author globs match characters, not bytes, in a UTF-8 locale
+_reg_init "$reg_dir/accents"
+_reg_commit "$reg_dir/accents" 2025-01-10 "Élodie Été" "feat: one"
+_reg_commit "$reg_dir/accents" 2025-01-11 "Recap Tester" "feat: two"
+if locale -a 2>/dev/null | grep -qiE '^en_US\.utf-?8$'; then
+    out=$(HOME="$reg_home" LC_ALL=en_US.UTF-8 "$GIT_RECAP" --team --exclude-author "?lodie*" -f json -p all "$reg_dir/accents" 2>/dev/null)
+    assert_eq "--exclude-author ? matches an accented letter" "Recap Tester" "$(echo "$out" | jq -r '[.contributors[].user] | join(",")')"
+    out=$(HOME="$reg_home" LC_ALL=en_US.UTF-8 "$GIT_RECAP" --team --exclude-author "élodie*" -f json -p all "$reg_dir/accents" 2>/dev/null)
+    assert_eq "--exclude-author folds accented capitals" "Recap Tester" "$(echo "$out" | jq -r '[.contributors[].user] | join(",")')"
+else
+    echo "  SKIP: en_US.UTF-8 locale not installed, skipping accented --exclude-author tests"
+fi
+
+# Options without a value exit 1 (Bash 3.2 used to exit 0)
+assert_exit "-u without a value exits 1" 1 "$GIT_RECAP" -u
+assert_exit "--exclude-author without a value exits 1" 1 "$GIT_RECAP" --team -p all "$reg_repo" --exclude-author
+assert_exit "-p with an empty value exits 1" 1 "$GIT_RECAP" -p "" "$reg_repo"
+
 # -u is matched literally, not as a regex
 out=$(HOME="$reg_home" "$GIT_RECAP" --all-commits -f json -p all -u "dependabot[bot]" "$reg_dir/odd" 2>/dev/null)
 assert_eq "-u with brackets matches the literal author" "1" "$(echo "$out" | jq '.commits | length')"
@@ -731,6 +763,11 @@ git -C "$reg_dir/rename" mv top.txt moved.txt
 git -C "$reg_dir/rename" commit -q -m "refactor: rename"
 out=$(HOME="$reg_home" "$GIT_RECAP" -f json -p all -u "Recap Tester" "$reg_dir/rename" 2>/dev/null)
 assert_eq "renamed paths keep their new name" "moved.txt,src/new/file.txt" "$(echo "$out" | jq -r '[.commits[0].files[].path] | sort | join(",")')"
+printf 'z\n' > "$reg_dir/rename/x => y.txt"
+git -C "$reg_dir/rename" add . && git -C "$reg_dir/rename" commit -q -m "feat: odd name"
+out=$(HOME="$reg_home" "$GIT_RECAP" -f json -p all -u "Recap Tester" "$reg_dir/rename" 2>/dev/null)
+assert_eq "a file named with \" => \" keeps its name" "x => y.txt" "$(echo "$out" | jq -r '.commits[0].files[0].path')"
+assert_eq "renamed files keep their line counts" "0|0" "$(echo "$out" | jq -r '.commits[1].files[0] | "\(.additions)|\(.deletions)"')"
 # A subject that looks like an echo option is still printed
 _reg_init "$reg_dir/dash"
 _reg_commit "$reg_dir/dash" 2025-01-12 "Recap Tester" "-n"
@@ -857,6 +894,19 @@ assert_contains "--all-branches lists branch commits" "$out" "feat: tracked file
 assert_not_contains "--all-branches skips stash index commits" "$out" "index on main"
 assert_not_contains "--all-branches skips stash untracked commits" "$out" "untracked files on main"
 
+# --all-branches includes a detached HEAD
+git -C "$reg_dir/stash" checkout -q --detach
+_reg_commit "$reg_dir/stash" 2025-02-01 "Recap Tester" "feat: detached work"
+out=$(HOME="$reg_home" "$GIT_RECAP" --all-branches -p all -m commits -u "Recap Tester" "$reg_dir/stash" 2>/dev/null)
+assert_contains "--all-branches lists commits of a detached HEAD" "$out" "feat: detached work"
+git -C "$reg_dir/stash" checkout -q main
+
+# -b accepts any revision, ranges included
+_reg_commit "$reg_dir/stash" 2025-02-02 "Recap Tester" "feat: second on main"
+out=$(HOME="$reg_home" "$GIT_RECAP" -b "main~1..main" -p all -m commits -u "Recap Tester" "$reg_dir/stash" 2>/dev/null)
+assert_contains "-b with a range lists its commits" "$out" "feat: second on main"
+assert_not_contains "-b with a range stops at its start" "$out" "feat: tracked file"
+
 # Changed files keep non-ASCII names readable
 printf 'x\n' > "$reg_dir/stash/数据.txt"
 git -C "$reg_dir/stash" add .
@@ -906,7 +956,20 @@ out=$(_mock_run --team -p all barename 2>&1)
 assert_contains "team recap of a bare repo name looks the user up" "$out" "Repo: recaptester/barename (using user: recaptester)"
 err=$(GH_MOCK_AUTH_RC=1 _mock_run -p all -u recaptester mock/repo 2>&1 >/dev/null)
 assert_eq "logged-out gh exits 1" "1" "$?"
-assert_contains "logged-out gh is reported as such" "$err" "gh is not authenticated. Run: gh auth login"
+assert_contains "logged-out gh is reported as such" "$err" "gh is not authenticated"
+
+# A failed user lookup is not taken as a login (gh prints the error body on stdout)
+err=$(GH_MOCK_FAIL=401 GH_MOCK_FAIL_ON=user _mock_run -p all mock/repo 2>&1 >/dev/null)
+assert_eq "failed user lookup exits 1" "1" "$?"
+assert_contains "failed user lookup is reported" "$err" "Could not detect GitHub user"
+assert_not_contains "failed user lookup does not leak the error body" "$err" "Mock failure"
+err=$(GH_MOCK_FAIL=401 GH_MOCK_FAIL_ON=user _mock_run --team -p all barename 2>&1 >/dev/null)
+assert_contains "team bare name with a failed user lookup says why" "$err" "without a GitHub user"
+
+# A network failure shows the real error, not only an authentication hint
+err=$(GH_MOCK_NETFAIL=1 _mock_run -p all -u recaptester mock/repo 2>&1 >/dev/null)
+assert_eq "network failure exits 1" "1" "$?"
+assert_contains "network failure shows the real error" "$err" "error connecting to api.github.com"
 
 # gh warnings on stderr are not parsed as commits
 out=$(GH_MOCK_STDERR="warning: something on stderr" _mock_run -f json -p all -u recaptester mock/repo 2>/dev/null)
@@ -1042,7 +1105,7 @@ echo "$(_bold "Agent skill")"
 
 SKILL_DIR="${SCRIPT_DIR}/skills/git-recap"
 TOTAL=$((TOTAL + 1))
-if cmp -s "$GIT_RECAP" "$SKILL_DIR/scripts/git-recap.sh"; then
+if cmp -s "$SCRIPT" "$SKILL_DIR/scripts/git-recap.sh"; then
     PASS=$((PASS + 1))
     printf '  %s %s\n' "$(_green "PASS")" "bundled skill script matches script.sh"
 else
@@ -1201,7 +1264,7 @@ else
 fi
 rm -f "$tmpfile"
 
-rm -rf "$mock_dir"
+rm -rf "$mock_dir" "$cli_dir"
 
 # ==============================================================================
 # Results

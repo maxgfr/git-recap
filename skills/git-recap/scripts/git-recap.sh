@@ -5,6 +5,12 @@ set -euo pipefail
 # Latin-1 history) cannot stop cut, sort or tr, and ordering is the same on
 # every machine. The user's locale is kept for case folding only.
 USER_LOCALE="${LC_ALL:-${LC_CTYPE:-${LANG:-C}}}"
+MATCH_LOCALE=C
+# Only use the user's locale for matching if Bash can switch to it silently
+_try_locale() { local LC_ALL="$1"; }
+if [[ -z "$(_try_locale "$USER_LOCALE" 2>&1)" ]]; then
+    MATCH_LOCALE="$USER_LOCALE"
+fi
 export LC_ALL=C
 
 # ==============================================================================
@@ -170,18 +176,29 @@ _split_details() {
 # _collect_local_details <git log args...> : records body + numstat per commit
 _collect_local_details() {
     [[ -n "$DETAILS_FILE" ]] || return 0
-    git -C "$LOCAL_REPO_DIR" -c core.quotePath=false log "$@" --numstat --format='%x1e%h%x1f%b%x1f' -- | jq -R -s -c '
+    # -z: entries end with NUL and a rename is "adds<TAB>dels<TAB>\0old\0new\0",
+    # so file names are taken verbatim (no quoting, no "old => new" to parse)
+    git -C "$LOCAL_REPO_DIR" log "$@" --numstat -z --format='%x1e%h%x1f%b%x1f' -- | jq -R -s -c '
+        # NUL-separated numstat tokens -> [{path, additions, deletions}]
+        def numstat:
+            split("\u0000") | map(ltrimstr("\n")) as $t
+            | reduce range(0; $t | length) as $i ({skip: 0, files: []};
+                if .skip > 0 then
+                    (if .skip == 1 then .files[-1].path = $t[$i] else . end) | .skip -= 1
+                else
+                    ($t[$i] | split("\t")) as $f
+                    | if ($f | length) >= 3 then
+                        .files += [{path: ($f[2:] | join("\t")),
+                                    additions: ($f[0] | tonumber? // 0), deletions: ($f[1] | tonumber? // 0)}]
+                        | if ($f[2:] | join("\t")) == "" then .skip = 2 else . end
+                      else . end
+                end)
+            | .files;
         split("\u001e") | .[1:][] | split("\u001f") as $p
         | {
             hash: $p[0],
             body: ($p[1] | sub("^\\s+"; "") | sub("\\s+$"; "")),
-            files: [($p[2] // "") | split("\n")[] | split("\t") | select(length >= 3)
-                | {path: (.[2:] | join("\t")
-                    | if test(" => ") then
-                        (if test("\\{") then sub("\\{[^}]* => (?<new>[^}]*)\\}"; "\(.new)") | gsub("//"; "/")
-                         else sub("^.* => "; "") end)
-                      else . end),
-                   additions: (.[0] | tonumber? // 0), deletions: (.[1] | tonumber? // 0)}]
+            files: (($p[2] // "") | numstat)
         }
         | .additions = ([.files[].additions] | add // 0)
         | .deletions = ([.files[].deletions] | add // 0)' >> "$DETAILS_FILE" \
@@ -260,11 +277,28 @@ _is_release_commit() {
 # that accented letters match too. Text that is not valid in that locale (BSD
 # tr stops on it) is lowercased byte-wise instead.
 _lowercase() {
+    # Bash 4+ folds multibyte letters itself; GNU tr only folds ASCII
+    if (( BASH_VERSINFO[0] >= 4 )); then
+        local LC_ALL="$MATCH_LOCALE" line
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            printf '%s\n' "${line,,}"
+        done
+        return 0
+    fi
+    # Bash 3.2 (macOS): BSD tr folds multibyte letters
     local text out
     text=$(cat)
-    out=$(printf '%s\n' "$text" | LC_ALL="$USER_LOCALE" tr '[:upper:]' '[:lower:]' 2>/dev/null) \
+    out=$(printf '%s\n' "$text" | LC_ALL="$MATCH_LOCALE" tr '[:upper:]' '[:lower:]' 2>/dev/null) \
         || out=$(printf '%s\n' "$text" | tr '[:upper:]' '[:lower:]')
     printf '%s\n' "$out"
+}
+
+# _glob_match <text> <glob> : glob match in the user's locale, so that "?"
+# matches one character and not one byte
+_glob_match() {
+    local LC_ALL="$MATCH_LOCALE"
+    # shellcheck disable=SC2053  # glob matching is intended
+    [[ "$1" == $2 ]]
 }
 
 # filter_noise <fields> : stdin = commit rows (author in field 4 when <fields> is 4).
@@ -303,7 +337,7 @@ filter_noise() {
             for pattern in "${patterns[@]}"; do
                 # A literal name first ("dependabot[bot]" is not a character class), then a glob
                 # shellcheck disable=SC2053  # glob matching is intended
-                if [[ "$lower_author" == "$pattern" || "$lower_author" == $pattern ]]; then
+                if [[ "$lower_author" == "$pattern" ]] || _glob_match "$lower_author" "$pattern"; then
                     skipped=$((skipped + 1))
                     continue 2
                 fi
@@ -412,22 +446,28 @@ HELP
 # Argument parsing
 # ==============================================================================
 
+# _value <option> [value] -> the value; dies when it is missing or empty
+_value() {
+    [[ -n "${2:-}" ]] || die "Missing value for $1"
+    printf '%s' "$2"
+}
+
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -u|--user)    ARG_USER="${2:?Missing value for $1}"; shift 2 ;;
-            -p|--period)  ARG_PERIOD="${2:?Missing value for $1}"; shift 2 ;;
-            -m|--mode)    ARG_MODE="${2:?Missing value for $1}"; shift 2 ;;
-            -f|--format)  ARG_FORMAT="${2:?Missing value for $1}"; shift 2 ;;
-            -o|--output)  ARG_OUTPUT="${2:?Missing value for $1}"; shift 2 ;;
-            -b|--branch)  ARG_BRANCH="${2:?Missing value for $1}"; shift 2 ;;
+            -u|--user)    ARG_USER="$(_value "$@")"; shift 2 ;;
+            -p|--period)  ARG_PERIOD="$(_value "$@")"; shift 2 ;;
+            -m|--mode)    ARG_MODE="$(_value "$@")"; shift 2 ;;
+            -f|--format)  ARG_FORMAT="$(_value "$@")"; shift 2 ;;
+            -o|--output)  ARG_OUTPUT="$(_value "$@")"; shift 2 ;;
+            -b|--branch)  ARG_BRANCH="$(_value "$@")"; shift 2 ;;
             --provider|--model|--lang|--voice)
                 die "$1 was removed in git-recap 2.0: AI writing now happens through the git-recap agent skill (npx skills add maxgfr/git-recap)" ;;
             --no-ai)      shift ;;  # Kept for compatibility: git-recap never calls AI
-            --since)      ARG_SINCE="${2:?Missing value for $1}"; shift 2 ;;
-            --until)      ARG_UNTIL="${2:?Missing value for $1}"; shift 2 ;;
+            --since)      ARG_SINCE="$(_value "$@")"; shift 2 ;;
+            --until)      ARG_UNTIL="$(_value "$@")"; shift 2 ;;
             --exclude-author)
-                ARG_EXCLUDE_AUTHORS+="${2:?Missing value for $1}"$'\n'; shift 2 ;;
+                ARG_EXCLUDE_AUTHORS+="$(_value "$@")"$'\n'; shift 2 ;;
             --all-commits) ARG_ALL_COMMITS=true; shift ;;
             --team)       ARG_TEAM=true; shift ;;
             --all-branches) ARG_ALL_BRANCHES=true; shift ;;
@@ -512,9 +552,11 @@ config_load() {
 # Prints the login of the authenticated gh user, or nothing (the call fails by
 # itself without credentials: no separate auth check needed)
 detect_github_user() {
-    if command -v gh &>/dev/null; then
-        gh api user --jq '.login' 2>/dev/null || true
+    local login
+    if command -v gh &>/dev/null && login=$(gh api user --jq '.login' 2>/dev/null </dev/null); then
+        [[ "$login" =~ ^[A-Za-z0-9-]+$ ]] && printf '%s\n' "$login"
     fi
+    return 0
 }
 
 detect_local_repo_user() {
@@ -523,7 +565,7 @@ detect_local_repo_user() {
 
     local user
     user=$(git -C "$ARG_REPO" config user.name 2>/dev/null || true)
-    [[ -z "$user" ]] && user=$(git -C "$ARG_REPO" log -1 --format='%an' 2>/dev/null || true)
+    [[ -z "$user" ]] && user=$(git -C "$ARG_REPO" log -1 --no-show-signature --format='%an' 2>/dev/null || true)
     [[ -n "$user" ]] && printf '%s\n' "$user"
 }
 
@@ -715,9 +757,10 @@ resolve_repo() {
     info "Repo: ${REPO_FULL}${via}"
 }
 
-# _local_ref_exists <ref> : true when <ref> names a commit in the local repo
+# _local_ref_exists <revision> : true when <revision> (a ref, main~3, a range)
+# resolves in the local repo
 _local_ref_exists() {
-    git -C "$LOCAL_REPO_DIR" rev-parse --verify --quiet "${1}^{commit}" >/dev/null 2>&1
+    git -C "$LOCAL_REPO_DIR" rev-parse --quiet "$1" -- >/dev/null 2>&1
 }
 
 detect_default_branch() {
@@ -818,6 +861,8 @@ _fetch_local() {
     if [[ "$ARG_ALL_BRANCHES" == true ]]; then
         # Not --all: that also walks refs/stash and refs/notes
         git_args+=(--branches --remotes --tags)
+        # ...plus HEAD, which may be detached on a commit no branch contains
+        _local_ref_exists HEAD && git_args+=(HEAD)
     else
         # A repository without any commit has nothing to list
         _local_ref_exists "$BRANCH" || return 0
@@ -844,10 +889,12 @@ _github_die() {
     local err="$1" status=""
     [[ "$err" =~ \(HTTP\ ([0-9]{3})\) ]] && status="${BASH_REMATCH[1]}"
     case "$status" in
-        401) die "GitHub rejected the credentials. Run: gh auth login" ;;
+        401)
+            command -v gh &>/dev/null || die "GitHub rejected the credentials. Check GH_TOKEN / GITHUB_TOKEN"
+            die "GitHub rejected the credentials. Run: gh auth login" ;;
         403|429) die "Access denied (rate limit or permissions): ${REPO_FULL}" ;;
         404)
-            if [[ -n "$ARG_BRANCH" ]]; then
+            if [[ -n "$ARG_BRANCH" && "$ARG_ALL_BRANCHES" == false ]]; then
                 die "Repository or branch not found: ${REPO_FULL} (branch: ${ARG_BRANCH})"
             fi
             die "Repository not found: ${REPO_FULL}" ;;
@@ -855,7 +902,7 @@ _github_die() {
     # No HTTP status: the request never reached the API. Only now is it worth
     # asking gh whether it is logged in (the check costs a network round trip).
     if [[ -z "$status" ]] && command -v gh &>/dev/null && ! gh auth status &>/dev/null; then
-        die "gh is not authenticated. Run: gh auth login"
+        warn "gh is not authenticated (or GitHub is unreachable). Run: gh auth login"
     fi
     die "GitHub API error: ${err:-unknown error}"
 }
@@ -918,7 +965,7 @@ _fetch_github() {
             done <<< "$branches"
         ) || exit 1
         # A commit reachable from several branches is listed once; newest day first
-        raw=$(printf '%s\n' "$raw" | awk -F'\t' '!seen[$1]++' | sort -s -t$'\t' -k3,3r)
+        raw=$(printf '%s\n' "$raw" | awk '!seen[$0]++' | sort -s -t$'\t' -k3,3r)
     else
         raw=$(_github_get "repos/${REPO_FULL}/commits?$(_commits_query "$BRANCH" "$mode")" "$filter") || exit 1
     fi
@@ -1313,7 +1360,9 @@ output_team_markdown() {
     echo "|--------|-------|"
     echo "| Contributors | $(printf '%s\n' "$ranking" | wc -l | tr -d ' ') |"
     echo "| Total commits | ${total} |"
-    echo "| Branch | $(_team_branch_label "all branches") |"
+    local branch_cell
+    branch_cell=$(_team_branch_label "all branches")
+    echo "| Branch | ${branch_cell//|/\\|} |"
     echo "| Active days | ${active_days:-0} |"
     echo "| Avg per day | ${avg_per_day:-0.0} |"
     echo "| Longest streak | ${longest_streak:-0} day(s) |"
