@@ -43,6 +43,8 @@ chmod +x /usr/local/bin/git-recap
 - `gh` (GitHub CLI, authenticated, for remote GitHub repositories)
 - `jq` (required for `-f json` and `curl` fallback)
 
+Without `gh`, remote repositories are read through `curl` and the public GitHub API. Set `GH_TOKEN` (or `GITHUB_TOKEN`) to raise the rate limit from 60 to 5000 requests an hour and to read private repositories.
+
 ## Usage
 
 ```
@@ -83,15 +85,19 @@ Options:
 | `current-year` | Current year |
 | `last-year` | Previous year |
 | `all` | All commits ever |
-| `<N>` | Last N months |
+| `<N>` | The current month and the N previous months (`-p 3` in November: August to November) |
 | `YYYY-MM` | Specific month (e.g., `2026-01`) |
 | `YYYY` | Specific year (e.g., `2025`) |
 
 For any other range, use `--since` and/or `--until` (inclusive dates), e.g. `--since 2026-01-05 --until 2026-01-16` for a sprint.
 
+Weeks run Monday to Sunday. Invalid periods and dates (`-p 2026-13`, `--since 2025-02-30`) are rejected before anything is fetched.
+
 ### Filtering
 
-Merge commits, bot authors (`*[bot]`, `*-bot`, such as `dependabot[bot]` or `semantic-release-bot`) and release commits (`chore(release): …`, bare version numbers) are skipped by default. The number of skipped commits is reported on stderr. Use `--all-commits` to keep them, and `--exclude-author "<glob>"` to leave specific people out of a team recap.
+Merge commits, bot authors (`*[bot]`, `*-bot`, such as `dependabot[bot]` or `semantic-release-bot`) and release commits (`chore(release): …`, bare version numbers) are skipped by default. The number of skipped commits is reported on stderr. Use `--all-commits` to keep them, and `--exclude-author "<name or glob>"` to leave specific people out of a team recap (a literal name such as `dependabot[bot]` works too).
+
+`-u` is matched against author names and emails as a plain substring. `--all-branches` reads local branches, remote-tracking branches and tags (not the stash).
 
 ### Team Mode
 
@@ -157,22 +163,31 @@ git recap maxgfr/subtool
 === Monthly Recap - subtool - March 2026 ===
 
 --- Stats ---
-  Total commits: 34
-  First commit:  2026-03-06
-  Last commit:   2026-03-13
-  Busiest day:   2026-03-08 (14 commits)
+
+  Total commits:   34
+  Active days:     6
+  Avg per day:     5.7
+  Longest streak:  4 day(s)
+  First commit:    2026-03-06
+  Last commit:     2026-03-13
+  Busiest day:     2026-03-08 (14 commits)
+  Busiest weekday: Sunday
 
 --- Changes ---
+
   • fix: translate text-only
+  ...
 
 --- Commits ---
-  7354b0c - fix: translate text-only (2026-03-13)
+
+  2026-03-13
+    7354b0c  fix: translate text-only
   ...
 ```
 
 ### Markdown
 
-Stats table, bullet list, and commit table. Hashes link to GitHub when the repository has a GitHub remote.
+Stats table, bullet list, and commit table. Hashes link to GitHub when the repository has a GitHub remote. A `|` inside a table cell is written as `\|`.
 
 ### JSON
 
@@ -181,6 +196,10 @@ Structured output with `repo`, `period`, `since`, `until`, `stats`, `bullets[]` 
 Each commit has `hash`, `message`, `date` and `body`. For local repositories, it also has `files[]` (`path`, `additions`, `deletions`) with `additions`/`deletions` totals, and stats gain `lines_added`, `lines_deleted` and `files_changed`. This is what the agent skill reads. It adds `summary` (and `team_summary`) and rewrites `bullets`.
 
 With the skill, the agent inserts a Summary section and rewritten bullets into these same layouts.
+
+## Errors
+
+A missing repository or branch, a rate limit, an authentication problem or a failing `git log` stops git-recap with a message on stderr and exit code 1. "No commits found" (exit 0) only means that the period really has no matching commits.
 
 ## Configuration
 
