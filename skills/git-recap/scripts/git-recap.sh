@@ -17,7 +17,7 @@ export LC_ALL=C
 # git-recap — Commit recap data generator (AI writing lives in the agent skill)
 # ==============================================================================
 
-VERSION="2.0.1"
+VERSION="2.0.2"
 CONFIG_FILE="$HOME/.git-recaprc"
 
 # Defaults
