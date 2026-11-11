@@ -210,10 +210,6 @@ GIT_RECAP_USER="maxgfr"
 GIT_RECAP_FORMAT="text"
 ```
 
-## Migrating from 1.x
-
-git-recap 2.0 removes the built-in AI providers. `--provider`, `--model`, `--lang` and `--voice` now exit with an error, and `--no-ai` is accepted but does nothing. Install the agent skill (`npx skills add maxgfr/git-recap`) and ask your agent for the recap instead. Legacy `GIT_RECAP_PROVIDER/MODEL/LANG/VOICE` lines in `~/.git-recaprc` are ignored.
-
 ## License
 
 MIT
