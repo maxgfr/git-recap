@@ -1372,6 +1372,190 @@ else
     printf '  %s %s\n' "$(_green "PASS")" "live GitLab public project: gitlab.com unreachable or offline (skip)"
 fi
 
+# ---------- Several repositories ----------
+
+echo ""
+echo "$(_bold "Multi-repo")"
+
+# m1: two commits of Recap Tester (one changes a file) and one of Jane Doe;
+# m2: one of each; m3: no commit at all. Jane has her own email (a shared
+# email would make them one person in a multi-repo team recap).
+multi_m1="$reg_dir/m1" multi_m2="$reg_dir/m2" multi_m3="$reg_dir/m3"
+_reg_init "$multi_m1"
+_reg_commit "$multi_m1" 2025-01-10 "Recap Tester" "feat: m1 first"
+printf 'a\nb\n' > "$multi_m1/file.txt"
+git -C "$multi_m1" add file.txt
+GIT_AUTHOR_DATE="2025-01-11T12:00:00" GIT_COMMITTER_DATE="2025-01-11T12:00:00" git -C "$multi_m1" commit -q -m "feat: m1 file"
+GIT_AUTHOR_EMAIL="jane@example.invalid" _reg_commit "$multi_m1" 2025-01-11 "Jane Doe" "fix: m1 by jane"
+_reg_init "$multi_m2"
+_reg_commit "$multi_m2" 2025-01-12 "Recap Tester" "feat: m2 only"
+GIT_AUTHOR_EMAIL="jane@example.invalid" _reg_commit "$multi_m2" 2025-01-12 "Jane Doe" "docs: m2 by jane"
+_reg_init "$multi_m3"
+_multi() { HOME="$reg_home" "$GIT_RECAP" "$@"; }
+_multi_sole() { _multi "$@" -p all -u "Recap Tester"; }
+
+# Text: global stats over both, per-repo table, sections in argument order
+out=$(_multi_sole "$multi_m1" "$multi_m2" 2>"$reg_dir/multi.err")
+assert_eq "multi-repo exits 0" "0" "$?"
+assert_eq "multi-repo text title" "=== Monthly Recap - 2 repos - All time ===" "$(echo "$out" | head -1)"
+assert_contains "multi-repo total is the sum of the repos" "$out" "  Total commits:   3"
+assert_contains "multi-repo text counts the repos" "$out" "  Repositories:    2"
+assert_contains "multi-repo text sums the line counts" "$out" "  Lines added:     +2"
+assert_contains "multi-repo text table: first repo" "$out" "  1. m1                             local      2 commits (67%)"
+assert_contains "multi-repo text table: second repo" "$out" "  2. m2                             local      1 commits (33%)"
+assert_eq "multi-repo text sections in argument order" "--- m1 ---|--- m2 ---" \
+    "$(echo "$out" | grep -E '^--- m[0-9] ---$' | tr '\n' '|' | sed 's/|$//')"
+assert_contains "multi-repo text section has its mini stats" "$out" "  2 commits, 2 active days, 2025-01-10 → 2025-01-11, +2/-0 lines in 1 files"
+assert_contains "multi-repo text section lists its commits" "$out" "    • feat: m2 only"
+assert_not_contains "multi-repo keeps the user filter per repo" "$out" "m1 by jane"
+assert_contains "multi-repo progress names each repo" "$(cat "$reg_dir/multi.err")" ":: [2/2] $multi_m2"
+assert_not_contains "multi-repo shows no user line when it is the same everywhere" "$out" "User: "
+
+# Markdown
+out=$(_multi_sole -f markdown "$multi_m1" "$multi_m2" 2>/dev/null)
+assert_eq "multi-repo markdown title" "# Monthly Recap - 2 repos - All time" "$(echo "$out" | head -1)"
+assert_contains "multi-repo markdown global stats" "$out" "| Total commits | 3 |"
+assert_contains "multi-repo markdown table" "$out" "| 2 | m2 | local | 1 | 33% |"
+assert_eq "multi-repo markdown sections in order, headings demoted" "## m1|### Changes|### Commits|## m2|### Changes|### Commits" \
+    "$(echo "$out" | grep -E '^## m[0-9]$|^### ' | tr '\n' '|' | sed 's/|$//')"
+out=$(_multi_sole -f markdown -m summary "$multi_m1" "$multi_m2" 2>/dev/null)
+assert_not_contains "multi-repo summary mode: no bullets" "$out" "### Changes"
+assert_contains "multi-repo summary mode: the section's mini stats line" "$out" $'## m2\n\n1 commits, 1 active days, 2025-01-12 → 2025-01-12'
+
+# JSON: global document, and repos[i] is the single-repo document
+out=$(_multi_sole -f json "$multi_m1" "$multi_m2" 2>/dev/null)
+assert_eq "multi-repo json globals" "2|All time|Recap Tester|3|2" \
+    "$(echo "$out" | jq -r '"\(.repos_count)|\(.period)|\(.user)|\(.stats.total_commits)|\(.stats.lines_added)"')"
+for multi_i in 1 2; do
+    multi_one=$(_multi_sole -f json "$reg_dir/m$multi_i" 2>/dev/null | jq -S -c .)
+    assert_eq "multi-repo json repos[$((multi_i - 1))] equals the single-repo json" "$multi_one" \
+        "$(echo "$out" | jq -S -c ".repos[$((multi_i - 1))]")"
+done
+out=$(_multi --team -f json -p all "$multi_m1" "$multi_m2" 2>/dev/null)
+assert_eq "multi-repo team json repos[1] equals the single-repo json" \
+    "$(_multi --team -f json -p all "$multi_m2" 2>/dev/null | jq -S -c .)" "$(echo "$out" | jq -S -c '.repos[1]')"
+
+# Team: the same author is merged across repos
+assert_eq "multi-repo team merges an author across repos" "Recap Tester:3,Jane Doe:2" \
+    "$(echo "$out" | jq -r '[.contributors[] | "\(.user):\(.stats.total_commits)"] | join(",")')"
+assert_eq "multi-repo team global stats" "5|2" "$(echo "$out" | jq -r '"\(.stats.total_commits)|\(.stats.contributors)"')"
+out=$(_multi --team -p all "$multi_m1" "$multi_m2" 2>/dev/null)
+assert_eq "multi-repo team text title" "=== Team Recap - 2 repos - All time ===" "$(echo "$out" | head -1)"
+assert_contains "multi-repo team text global contributors" "$out" $'--- Contributors ---\n\n  1. Recap Tester           3 commits (60%)\n  2. Jane Doe               2 commits (40%)'
+out=$(_multi --team -f markdown -p all "$multi_m1" "$multi_m2" 2>/dev/null)
+assert_contains "multi-repo team markdown: contributors of a section one level down" "$out" $'## m2\n\n2 commits, 2 contributors, 1 active days, 2025-01-12 → 2025-01-12, +0/-0 lines in 0 files\n\n### Contributors'
+assert_contains "multi-repo team markdown: author subsections one level down" "$out" "#### Changes"
+
+# A repo with zero commits keeps its row and section
+out=$(_multi_sole -f markdown "$multi_m1" "$multi_m3" 2>/dev/null)
+assert_eq "multi-repo with an empty repo exits 0" "0" "$?"
+assert_contains "multi-repo empty repo row" "$out" "| 2 | m3 | local | 0 | 0% |"
+assert_contains "multi-repo empty repo section" "$out" $'## m3\n\nNo commits found for **Recap Tester** during this period.'
+out=$(_multi_sole -f json "$multi_m1" "$multi_m3" 2>/dev/null)
+assert_eq "multi-repo empty repo in json" "2|0" "$(echo "$out" | jq -r '"\(.stats.total_commits)|\(.repos[1].commits | length)"')"
+
+# No commits anywhere: the repo list with zeros, no error
+out=$(_multi -p 2020-01 -u "Recap Tester" "$multi_m1" "$multi_m2" 2>/dev/null)
+assert_eq "multi-repo all empty exits 0" "0" "$?"
+assert_contains "multi-repo all empty says so" "$out" $'=== Monthly Recap - 2 repos - January 2020 ===\n\nNo commits found for Recap Tester during this period.'
+assert_contains "multi-repo all empty lists the repos" "$out" "  2. m2                             local      0 commits (0%)"
+out=$(_multi -f json --team -p 2020-01 "$multi_m1" "$multi_m2" 2>/dev/null)
+assert_eq "multi-repo all empty json" "2|0|0" "$(echo "$out" | jq -r '"\(.repos | length)|\(.stats.total_commits)|\(.contributors | length)"')"
+
+# A repo given twice is fetched once; all arguments naming one repo give its own recap
+rm -f "$reg_dir/gh.log"
+out=$(GH_MOCK_LOG="$reg_dir/gh.log" _mock_run -f json -p all -u recaptester mock/repo "$multi_m1" https://github.com/Mock/Repo 2>"$reg_dir/multi.err")
+assert_eq "multi-repo duplicate is fetched once" "1" "$(grep -c '/commits' "$reg_dir/gh.log")"
+assert_eq "multi-repo duplicate is listed once" "2|mock/repo,m1" "$(echo "$out" | jq -r '"\(.repos_count)|\([.repos[].repo] | join(","))"')"
+assert_contains "multi-repo duplicate is reported" "$(cat "$reg_dir/multi.err")" "Skipping Mock/Repo: already in the recap"
+assert_eq "multi-repo of one repo twice is its single-repo recap" "$(_multi_sole -f markdown "$multi_m1" 2>/dev/null)" \
+    "$(_multi_sole -f markdown "$multi_m1" "$multi_m1/." 2>/dev/null)"
+
+# Mixed providers in one run: each section links with its own commit URL
+# (the gh mock, then the GitLab curl mock; the gh mock also needs dirname)
+mixed_bin="$reg_dir/mixed-bin"
+mkdir -p "$mixed_bin"
+ln -s "$(command -v dirname)" "$mixed_bin/dirname"
+out=$(env -u GH_TOKEN -u GITHUB_TOKEN -u GITLAB_TOKEN -u GL_TOKEN PATH="$mock_dir/bin:$mixed_bin:$gl_bin" HOME="$reg_home" \
+    "$GIT_RECAP" -f markdown -m commits -p all -u "Recap Tester" "$multi_m2" mock/repo "$gl_url" 2>"$reg_dir/multi.err")
+assert_eq "multi-repo mixed providers exits 0" "0" "$?"
+assert_contains "multi-repo mixed table" "$out" "| 3 | [a/b/c/proj](https://gitlab.example.org/a/b/c/proj) | gitlab | 2 | 50% |"
+multi_gh=$(echo "$out" | awk '/^## \[mock\/repo\]/ {on = 1; next} /^## / {on = 0} on')
+multi_gl=$(echo "$out" | awk '/^## \[a\/b\/c\/proj\]/ {on = 1; next} /^## / {on = 0} on')
+assert_contains "multi-repo GitHub section links with /commit/" "$multi_gh" "[aaaaaaa](https://github.com/mock/repo/commit/aaaaaaa)"
+assert_contains "multi-repo GitLab section links with /-/commit/" "$multi_gl" "[1111111](https://gitlab.example.org/a/b/c/proj/-/commit/1111111)"
+assert_not_contains "multi-repo GitLab section has no GitHub link" "$multi_gl" "github.com"
+assert_not_contains "multi-repo local section has no link" "$(echo "$out" | awk '/^## m2$/ {on = 1; next} /^## / {on = 0} on')" "]("
+
+# Team across providers: one person under a GitHub login and a GitLab name is
+# merged in the global contributors only. GitHub: jdoe (commit name "Jane Doe"),
+# GitlabTester (merges with GitLab "Gitlab Tester" by normalisation alone),
+# octocat (nobody else). GitLab mock: "Gitlab Tester" and "Jane Doe".
+cat > "$mock_dir/commits-people.json" <<'FIXTURE'
+[
+  {"sha": "d000001aaaa", "parents": [{"sha": "p0"}], "author": {"login": "jdoe"},
+   "commit": {"message": "feat: jdoe one", "author": {"name": "Jane Doe", "email": "jane@corp.invalid", "date": "2025-03-06T10:00:00Z"}}},
+  {"sha": "d000002aaaa", "parents": [{"sha": "p0"}], "author": {"login": "jdoe"},
+   "commit": {"message": "feat: jdoe two", "author": {"name": "Jane Doe", "email": "jane@corp.invalid", "date": "2025-03-07T10:00:00Z"}}},
+  {"sha": "d000003aaaa", "parents": [{"sha": "p0"}], "author": {"login": "GitlabTester"},
+   "commit": {"message": "fix: by the tester", "author": {"name": "G. T.", "email": "gt@corp.invalid", "date": "2025-03-07T11:00:00Z"}}},
+  {"sha": "d000004aaaa", "parents": [{"sha": "p0"}], "author": {"login": "octocat"},
+   "commit": {"message": "docs: by octocat", "author": {"name": "Octo Cat", "email": "123+octocat@users.noreply.github.com", "date": "2025-03-08T10:00:00Z"}}}
+]
+FIXTURE
+_people_run() {
+    env -u GH_TOKEN -u GITHUB_TOKEN -u GITLAB_TOKEN -u GL_TOKEN GH_MOCK_COMMITS="$mock_dir/commits-people.json" \
+        PATH="$mock_dir/bin:$mixed_bin:$gl_bin" HOME="$reg_home" "$GIT_RECAP" "$@"
+}
+out=$(_people_run --team -f json -p all mock/repo "$gl_url" 2>/dev/null)
+assert_eq "multi-repo team merges a GitHub login with its GitLab name" "jdoe:3:Jane Doe" \
+    "$(echo "$out" | jq -r '.contributors[] | select(.user == "jdoe") | "\(.user):\(.stats.total_commits):\(.aliases | join(","))"')"
+assert_eq "multi-repo team merges keys equal once normalised" "GitlabTester:2:Gitlab Tester" \
+    "$(echo "$out" | jq -r '.contributors[] | select(.user == "GitlabTester") | "\(.user):\(.stats.total_commits):\(.aliases | join(","))"')"
+assert_eq "multi-repo team keeps distinct people apart" "jdoe,GitlabTester,octocat|3" \
+    "$(echo "$out" | jq -r '"\([.contributors[].user] | join(","))|\(.stats.contributors)"')"
+assert_eq "multi-repo team merge leaves repos[i] as the single-repo json" \
+    "$(_people_run --team -f json -p all "$gl_url" 2>/dev/null | jq -S -c .)" "$(echo "$out" | jq -S -c '.repos[1]')"
+out=$(_people_run --team -p all mock/repo "$gl_url" 2>/dev/null)
+assert_contains "multi-repo team text shows the merged person once" "$out" \
+    $'--- Contributors ---\n\n  1. jdoe                   3 commits (50%)\n  2. GitlabTester           2 commits (33%)\n  3. octocat                1 commits (17%)'
+assert_contains "multi-repo team sections keep their own names" "$out" "  1. Jane Doe               1 commits (50%)"
+out=$(_people_run --team -f json -p all --exclude-author jdoe mock/repo "$gl_url" 2>/dev/null)
+assert_eq "multi-repo --exclude-author still applies per repo" "GitlabTester:2,Jane Doe:1,octocat:1" \
+    "$(echo "$out" | jq -r '[.contributors[] | "\(.user):\(.stats.total_commits)"] | sort | join(",")')"
+rm -f "$mock_dir/commits-people.json"
+
+# Long repository names keep the text table aligned
+multi_long="$reg_dir/a-repository-name-longer-than-thirty-characters"
+_reg_init "$multi_long"
+_reg_commit "$multi_long" 2025-01-10 "Recap Tester" "feat: long"
+out=$(_multi_sole "$multi_m1" "$multi_long" 2>/dev/null)
+assert_eq "multi-repo text table aligns a long repo name" \
+    "$(printf '  1. %-47s local      2 commits (67%%)|  2. %s local      1 commits (33%%)' m1 "${multi_long##*/}")" \
+    "$(echo "$out" | grep -E '^  [0-9]\. ' | head -2 | tr '\n' '|' | sed 's/|$//')"
+
+# Without -u, each provider detects its own user, shown per section
+out=$(_mock_run -f markdown -p all "$multi_m2" mock/repo 2>/dev/null)
+assert_contains "multi-repo user per section (local)" "$out" $'## m2\n\nUser: **Recap Tester**'
+assert_contains "multi-repo user per section (GitHub)" "$out" $'## [mock/repo](https://github.com/mock/repo)\n\nUser: **recaptester**'
+assert_eq "multi-repo json has no global user when they differ" "null" \
+    "$(_mock_run -f json -p all "$multi_m2" mock/repo 2>/dev/null | jq -c '.user')"
+
+# -b is for one repository; a failing repository stops the whole run
+err=$(_multi_sole -b main "$multi_m1" "$multi_m2" 2>&1 >/dev/null)
+assert_eq "multi-repo -b exits 1" "1" "$?"
+assert_contains "multi-repo -b is reported" "$err" "-b applies to a single repository; with several repos each one uses its default branch"
+out=$(GH_MOCK_FAIL=404 _mock_run -p all -u recaptester "$multi_m1" mock/repo 2>"$reg_dir/multi.err")
+assert_eq "multi-repo failing repo exits 1" "1" "$?"
+assert_eq "multi-repo failing repo prints no partial recap" "" "$out"
+assert_contains "multi-repo failing repo is named" "$(cat "$reg_dir/multi.err")" "Could not recap mock/repo (repository 2 of 2)"
+assert_contains "multi-repo failing repo keeps the provider error" "$(cat "$reg_dir/multi.err")" "Repository not found: mock/repo"
+
+# -o writes the combined recap
+_multi_sole -f markdown -o "$reg_dir/multi.md" "$multi_m1" "$multi_m2" >"$reg_dir/multi.stdout" 2>/dev/null
+assert_eq "multi-repo -o writes the combined recap" "$(_multi_sole -f markdown "$multi_m1" "$multi_m2" 2>/dev/null)" "$(cat "$reg_dir/multi.md")"
+assert_eq "multi-repo -o leaves stdout empty" "" "$(cat "$reg_dir/multi.stdout")"
+
 rm -rf "$reg_dir"
 
 echo ""

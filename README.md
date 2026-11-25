@@ -17,6 +17,7 @@ The skill bundles its own copy of the CLI, so no other install is needed. Then a
 
 - "Recap my commits this month on this repo"
 - "Team recap of maxgfr/subtool for last month, in French, as markdown in recap.md"
+- "Recap of last month across owner/api, owner/web and https://gitlab.com/group/app"
 - "What did I ship in 2025? First person."
 - "Standup for yesterday" / "Weekly report" / "Release changelog for last month" / "Client activity report for January"
 
@@ -51,11 +52,12 @@ GitLab projects (gitlab.com or a self-hosted instance) are read through the GitL
 ## Usage
 
 ```
-git-recap [OPTIONS] <repo>
+git-recap [OPTIONS] <repo> [<repo>...]
 
 Arguments:
   <repo>              GitHub URL, owner/repo, repo name, SSH URL, GitLab URL
                       (gitlab.com or self-hosted), or local path (.)
+                      With several repos: global stats, then one section per repo
 
 Options:
   -u, --user <user>       GitHub username (auto-detected via gh); for GitLab,
@@ -67,7 +69,8 @@ Options:
                           (bullets are raw commit messages; summaries come from the skill)
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
-  -b, --branch <branch>   Branch or revision, e.g. main~10..main (default: auto-detected)
+  -b, --branch <branch>   Branch or revision, e.g. main~10..main (default: auto-detected;
+                          single repo only)
   --since <YYYY-MM-DD>    Start date (inclusive), instead of -p
   --until <YYYY-MM-DD>    End date (inclusive), instead of -p
   --team                  Team mode: all contributors, grouped by author
@@ -119,6 +122,22 @@ git-recap --team --all-branches -f markdown -o recap.md maxgfr/subtool
 git-recap --team -b develop maxgfr/subtool
 ```
 
+### Several repositories
+
+Pass several repositories to get one recap across all of them. GitHub, GitLab (gitlab.com or self-hosted) and local paths can be mixed:
+
+```bash
+git-recap -p last-month SocialGouv/egapro \
+  https://pic.sg.social.gouv.fr/socialgouv/produits-dnum/travail/egapro-1/egapro-1 \
+  SocialGouv/cdtn-admin SocialGouv/code-du-travail-numerique
+```
+
+The recap starts with global stats over every repository (plus lines added and deleted when local repositories provide them) and a table with each repository's provider, commits and share. In team mode, a contributors table follows, with each author merged across repositories by name. Then each repository gets its own section, in argument order, with its bullets and commits (only its one-line stats with `-m summary`) and commit links to its own host.
+
+Each repository is resolved and fetched on its own, with its own provider, branch and, without `-u`, its own detected user (shown in each section when they differ). `-u`, `-p`, `--since`/`--until`, `-m`, `--team`, `--all-branches`, `--exclude-author` and `--all-commits` apply to every repository. `-b` is for a single repository: with several, each one uses its default branch. A repository given twice is read once. A repository that fails (not found, authentication) stops the whole run with an error naming it: a partial recap is never printed. A repository without commits in the period keeps its row and section.
+
+In JSON, the document has `repos_count`, `period`, `since`, `until`, `user` (when it is the same for every repository), global `stats` (and `contributors` in team mode), and `repos[]`: each element is exactly what `git-recap -f json <that repo>` prints.
+
 ## Examples
 
 ```bash
@@ -148,6 +167,9 @@ git-recap -f json -m commits maxgfr/subtool | jq .
 
 # Team mode
 git-recap --team maxgfr/subtool
+
+# Several repositories, GitHub and GitLab mixed
+git-recap -p last-month -f markdown maxgfr/subtool https://gitlab.com/group/project .
 
 # From various URL formats
 git-recap https://github.com/maxgfr/subtool
