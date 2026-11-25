@@ -1,6 +1,6 @@
 ---
 name: git-recap
-description: Generate a work recap from git commits — a written summary plus clean bullet points, for one person or a whole team, over a period (this month, last week, a year...). Use when the user asks for a recap, standup update, weekly report, release changelog, client/activity report, or "what did I/we do" over a period on a local, GitHub or GitLab repository.
+description: Generate a work recap from git commits — a written summary plus clean bullet points, for one person or a whole team, over a period (this month, last week, a year...). Use when the user asks for a recap, standup update, weekly report, release changelog, client/activity report, or "what did I/we do" over a period on one or several local, GitHub or GitLab repositories.
 ---
 
 # git-recap
@@ -16,6 +16,7 @@ Use `git-recap` if it is on the `PATH`. Otherwise use the copy bundled with this
 | Request | Flag |
 |---------|------|
 | Repository (default: current directory `.`) | `<repo>`: local path, `owner/repo`, GitHub URL, SSH URL, GitLab URL (gitlab.com or self-hosted, nested groups) |
+| Several repositories | `<repo> <repo>...` in one run (providers can be mixed; `-b` is then not allowed) |
 | Period (default `current-month`) | `-p current-month\|last-month\|current-week\|last-week\|current-year\|last-year\|all\|<N months>\|YYYY-MM\|YYYY` |
 | Custom range (sprint, billing period, "since Monday"...) | `--since YYYY-MM-DD [--until YYYY-MM-DD]` (inclusive; not combined with `-p`) |
 | Specific author | `-u <user>` (auto-detected otherwise; a commit author name or email for GitLab) |
@@ -37,20 +38,22 @@ Writing options come from the request, not from the CLI:
 Run the CLI read-only and never modify the repository. stdout is the data; stderr carries diagnostics such as the detected user, branch and period.
 
 ```bash
-git-recap -f json -m all -p <period> [-u <user>] [--team] [-b <branch>|--all-branches] <repo>
+git-recap -f json -m all -p <period> [-u <user>] [--team] [-b <branch>|--all-branches] <repo> [<repo>...]
 ```
+
+With several repositories, pass them all in one run. The JSON then has `repos_count`, `period`, `since`, `until`, `user` (when the same everywhere), global `stats` (plus `contributors` in team mode), and `repos[]`: one single-repository document per repository, as described below.
 
 - In single-user mode, the JSON has `repo`, `period`, `since`, `until`, `user`, `stats`, `bullets[]` (raw messages) and `commits[]`.
 - In team mode, it has `global_stats` plus `contributors[]`, each with `user`, `stats`, `bullets[]` and `commits[]`.
 - Each commit has `hash`, `message` (subject), `date` and `body`. For local repositories it also has `files[]` (`path`, `additions`, `deletions`), `additions` and `deletions`. Stats then include `lines_added`, `lines_deleted` and `files_changed`.
 - Merge commits, bot authors (`*[bot]`, `*-bot`) and release commits (`chore(release)…`, bare version numbers) are already filtered out.
-- If `commits` / `contributors` is empty, say that no commits were found for the period and stop. Never invent commits.
+- If `commits` / `contributors` is empty, say that no commits were found for the period and stop. Never invent commits. With several repositories, stop only when every repository is empty; otherwise say which ones had no commits.
 
 Use the bodies and changed files to understand **why** and **where** a change happened. Do not copy them verbatim. Terse subjects like "fix: typo" or "wip" become meaningful when read with their body and files.
 
 ## 4. Write the content
 
-**Summary**: 3–5 sentences suitable for a report. Synthesize by themes (features, bug fixes, refactoring, documentation, infrastructure, etc.) in a professional tone. Do not list individual commits; give a high-level overview of what was accomplished. In team mode, write one overall team summary for a project manager (major achievements, overall direction) and one summary per contributor.
+**Summary**: 3–5 sentences suitable for a report. Synthesize by themes (features, bug fixes, refactoring, documentation, infrastructure, etc.) in a professional tone. Do not list individual commits; give a high-level overview of what was accomplished. In team mode, write one overall team summary for a project manager (major achievements, overall direction) and one summary per contributor. With several repositories, write one global summary across them first, then a short summary (1–3 sentences) per repository from its `repos[]` entry.
 
 **Bullet points**: rewrite the commit messages as clean, readable bullets.
 - One bullet per commit, preserving the order of the commit messages.
@@ -82,6 +85,7 @@ Reuse the CLI's own layout so stats tables and commit links stay identical:
   - Insert a `## Summary` section (text: `--- Summary ---`) right after the stats section.
   - In team mode, insert `## Team Summary` (text: `--- Team Summary ---`) after the overview, and a per-contributor `### Summary` (text: `  Summary:`) before each contributor's changes.
   - Replace each raw item of the `Changes` lists with your rewritten bullet, keeping the same order and count.
-- **json**: take the JSON from step 3. Add `summary` and replace `bullets` with your bullets. In team mode, add a top-level `team_summary` and a `summary` per contributor.
+  - With several repositories, insert the global `## Summary` (text: `--- Summary ---`) after the `Repositories` table (after `Contributors` in team mode), and each repository's `### Summary` (text: `  Summary:`) right after its one-line stats. Rewritten bullets go in each repository's `### Changes` (text: `  Changes:`).
+- **json**: take the JSON from step 3. Add `summary` and replace `bullets` with your bullets. In team mode, add a top-level `team_summary` and a `summary` per contributor. With several repositories, add a top-level `summary` and apply these rules to each `repos[]` entry.
 
 If the user asked for a file, write the final recap there. Otherwise show it in the reply.

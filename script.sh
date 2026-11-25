@@ -32,7 +32,9 @@ ARG_MODE=""
 ARG_FORMAT=""
 ARG_OUTPUT=""
 ARG_BRANCH=""
-ARG_REPO=""
+ARG_REPO=""        # The repository being recapped (the first one when parsing)
+ARG_REPOS=()       # Every <repo> argument, in order
+ARG_REPO_COUNT=0
 ARG_INIT=false
 ARG_TEAM=false
 ARG_ALL_BRANCHES=false
@@ -57,6 +59,12 @@ UNTIL=""
 PERIOD_LABEL=""
 WORK_DIR=""      # Scratch directory, removed on exit
 DETAILS_FILE=""  # JSON lines {hash, body, files?, additions?, deletions?} (json format only)
+REPO_COMMITS=""  # Commit rows of the recapped repository (set by recap_repo)
+REPO_OUTPUT=""   # Its single-repository recap, as printed (set by recap_repo)
+
+# Multi-repository recap: each repository runs in a subshell (see recap_multi)
+MULTI_SEEN=""         # File of the repositories already recapped, one key per line
+REPO_DUPLICATE=false  # The repository is already in the recap: nothing was fetched
 
 # ==============================================================================
 # Helpers
@@ -143,29 +151,36 @@ _tsv_rows() {
 
 # jq program turning a GitHub API commit list into TSV rows, merges excluded.
 # Fields: hash, subject, date[, author], body (the body is JSON-encoded)
+# With "ids" (multi-repo team mode), each commit also yields an identity line:
+# \x1e author key, author name, email, 1 when the key is a GitHub login.
 # shellcheck disable=SC2016  # the $names below are jq variables
 _gh_commit_jq() {
-    local author=""
+    local author="" ids=""
     [[ "${1:-}" == "team" ]] && author=', ((.author.login // .commit.author.name // "") | field($no_author))'
+    [[ "${2:-}" == "ids" ]] && ids=', ("\u001e" + ([
+            ((.author.login // .commit.author.name // "") | field($no_author)),
+            ((.commit.author.name // "") | field($no_author)),
+            ((.commit.author.email // "") | field("")),
+            (if .author.login then "1" else "0" end) ] | join("\t")))'
     printf '%s' '
         def field($placeholder):
             gsub("[\\t\\r\\n]+"; " ") | sub("^ +"; "") | sub(" +$"; "")
             | if . == "" then $placeholder else . end;
         "'"$NO_SUBJECT"'" as $no_subject | "'"$NO_AUTHOR"'" as $no_author
         | .[] | select((.parents | length) < 2)
-        | [ .sha[0:7],
+        | ([ .sha[0:7],
             (.commit.message | split("\n")[0] // "" | field($no_subject)),
             (.commit.author.date | split("T")[0])'"$author"',
             (.commit.message | split("\n")[1:] | join("\n") | @json) ]
-        | join("\t")'
+        | join("\t"))'"$ids"
 }
 
 # jq program turning a GitLab API commit list into the same rows: each commit
 # is first given the shape _gh_commit_jq reads (no login: the author name is used)
 _gl_commit_jq() {
-    printf '%s' 'map({sha: .id, parents: .parent_ids, author: {},
-        commit: {message: (.message // ""), author: {name: .author_name, date: .authored_date}}}) | '
-    _gh_commit_jq "${1:-}"
+    printf '%s' 'map({sha: .id, parents: .parent_ids, author: {}, commit: {message: (.message // ""),
+        author: {name: .author_name, email: .author_email, date: .authored_date}}}) | '
+    _gh_commit_jq "${1:-}" "${2:-}"
 }
 
 # _split_details <n> : stdin = TSV whose field n+1 is the JSON-encoded body.
@@ -386,12 +401,13 @@ show_help() {
 git-recap — Monthly commit recap generator
 
 Usage:
-  git-recap [OPTIONS] <repo>
+  git-recap [OPTIONS] <repo> [<repo>...]
 
 # Arguments
 
   <repo>              GitHub URL, owner/repo, repo name, SSH URL, GitLab URL
                       (gitlab.com or self-hosted), or local path (.)
+                      With several repos: global stats, then one section per repo
 
 # Options
 
@@ -405,7 +421,8 @@ Usage:
                           written by the git-recap agent skill)
   -f, --format <format>   Format: text, markdown, json (default: text)
   -o, --output <file>     Write output to file
-  -b, --branch <branch>   Branch or revision, e.g. main~10..main (default: auto-detected)
+  -b, --branch <branch>   Branch or revision, e.g. main~10..main (default: auto-detected;
+                          single repo only)
   --since <YYYY-MM-DD>    Start date (inclusive), instead of -p
   --until <YYYY-MM-DD>    End date (inclusive), instead of -p
   --team                  Team mode: recap for all contributors grouped by author
@@ -463,6 +480,11 @@ Usage:
   git-recap --team --exclude-author "jdoe" .           # Team recap without jdoe
   git-recap --team --all-commits .                     # Keep bots and release commits
 
+  ## Several repos (GitHub, GitLab and local paths can be mixed)
+  git-recap -p last-month maxgfr/subtool https://gitlab.com/group/project .
+  git-recap --team -f markdown -o recap.md owner/api owner/web
+  git-recap -f json owner/api https://gitlab.example.org/group/app | jq '.repos[].repo'
+
   ## Repo formats
   git-recap maxgfr/subtool                             # owner/repo
   git-recap https://github.com/maxgfr/subtool          # HTTPS URL
@@ -508,8 +530,8 @@ parse_args() {
             -v|--version) echo "git-recap $VERSION"; exit 0 ;;
             -*)           die "Unknown option: $1" ;;
             *)
-                [[ -z "$ARG_REPO" ]] || die "Unexpected argument: $1"
-                ARG_REPO="$1"; shift ;;
+                [[ -n "$ARG_REPO" ]] || ARG_REPO="$1"
+                ARG_REPOS+=("$1"); ARG_REPO_COUNT=$((ARG_REPO_COUNT + 1)); shift ;;
         esac
     done
 }
@@ -538,6 +560,10 @@ validate_args() {
         text|markdown|json) ;;
         *) die "Invalid format: $format (expected: text, markdown, json)" ;;
     esac
+
+    if [[ $ARG_REPO_COUNT -gt 1 && -n "$ARG_BRANCH" ]]; then
+        die "-b applies to a single repository; with several repos each one uses its default branch"
+    fi
 
     # A leading dash would be read as an option by git log
     [[ "$ARG_BRANCH" != -* ]] || die "Invalid branch name: $ARG_BRANCH"
@@ -997,6 +1023,27 @@ _fetch_local() {
     git -C "$LOCAL_REPO_DIR" log "${git_args[@]}" --format="$row_format" -- | _tsv_rows \
         || die "git log failed in $LOCAL_REPO_DIR"
     _collect_local_details "${git_args[@]}"
+    if _wants_identities "$mode"; then
+        git -C "$LOCAL_REPO_DIR" log "${git_args[@]}" --format='%aN%x1f%aN%x1f%aE%x1f0' -- \
+            | awk -F'\037' -v OFS='\t' -v no_author="$NO_AUTHOR" '{
+                for (i = 1; i <= NF; i++) gsub(/\t/, " ", $i)
+                if ($1 == "") $1 = $2 = no_author
+                $1 = $1
+                print
+            }' | sort -u >> "$WORK_DIR/identities" || die "git log failed in $LOCAL_REPO_DIR"
+    fi
+}
+
+# _wants_identities <mode> : true when the fetch records who each author key is
+# (multi-repo team mode: authors are merged across providers, see _identity_map)
+_wants_identities() { [[ "$1" == "team" && -n "$MULTI_SEEN" ]]; }
+
+# _split_identities : stdin = rows and \x1e identity lines; the identity lines
+# go to WORK_DIR/identities, the rows to stdout
+_split_identities() {
+    IDS="$WORK_DIR/identities" awk '
+        substr($0, 1, 1) == "\036" { print substr($0, 2) >> ENVIRON["IDS"]; next }
+        { print }'
 }
 
 # _github_die <error text> : exit with a readable message for a failed API call.
@@ -1125,11 +1172,12 @@ _gitlab_get() {
 # _fetch_remote <mode> <fields> : commits of the remote repo through the API of
 # its provider (both list commits newest first, 100 per page)
 _fetch_remote() {
-    local mode="$1" fields="$2" get=_github_get filter base="repos/${REPO_FULL}" ref_param=sha raw
-    filter=$(_gh_commit_jq "$mode")
+    local mode="$1" fields="$2" get=_github_get filter base="repos/${REPO_FULL}" ref_param=sha raw ids=""
+    _wants_identities "$mode" && ids="ids"
+    filter=$(_gh_commit_jq "$mode" "$ids")
     if [[ "$REPO_PROVIDER" == "gitlab" ]]; then
         get=_gitlab_get base="$(_gl_project)/repository" ref_param=ref_name
-        filter=$(_gl_commit_jq "$mode")
+        filter=$(_gl_commit_jq "$mode" "$ids")
     fi
 
     if [[ "$ARG_ALL_BRANCHES" == true ]]; then
@@ -1141,10 +1189,12 @@ _fetch_remote() {
                 "$get" "${base}/commits?$(_commits_query "$branch" "$mode" "$ref_param")" "$filter" || exit 1
             done <<< "$branches"
         ) || exit 1
+        [[ -z "$ids" ]] || raw=$(printf '%s\n' "$raw" | _split_identities)
         # A commit reachable from several branches is listed once; newest day first
         raw=$(printf '%s\n' "$raw" | awk '!seen[$0]++' | sort -s -t$'\t' -k3,3r)
     elif [[ -n "$BRANCH" ]]; then
         raw=$("$get" "${base}/commits?$(_commits_query "$BRANCH" "$mode" "$ref_param")" "$filter") || exit 1
+        [[ -z "$ids" ]] || raw=$(printf '%s\n' "$raw" | _split_identities)
     else
         raw=""  # An empty GitLab project has no default branch
     fi
@@ -1310,15 +1360,10 @@ _print_commits_markdown() {
 
 # --- Single-user recap ---
 
-format_text() {
-    local commits="$1" stats="$2"
+# _stats_text <stats> / _stats_markdown <stats> : the lines of a Stats section
+_stats_text() {
     local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
-    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$stats"
-
-    echo "=== Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL} ==="
-    echo ""
-    echo "--- Stats ---"
-    echo ""
+    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$1"
     echo "  Total commits:   ${total}"
     echo "  Active days:     ${active_days:-0}"
     echo "  Avg per day:     ${avg_per_day:-0.0}"
@@ -1327,6 +1372,29 @@ format_text() {
     echo "  Last commit:     ${last_date}"
     echo "  Busiest day:     ${busiest_day} (${busiest_count} commits)"
     echo "  Busiest weekday: ${busiest_weekday:-N/A}"
+}
+
+_stats_markdown() {
+    local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
+    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$1"
+    echo "| Total commits | ${total} |"
+    echo "| Active days | ${active_days:-0} |"
+    echo "| Avg per day | ${avg_per_day:-0.0} |"
+    echo "| Longest streak | ${longest_streak:-0} day(s) |"
+    echo "| First commit | ${first_date} |"
+    echo "| Last commit | ${last_date} |"
+    echo "| Busiest day | ${busiest_day} (${busiest_count} commits) |"
+    echo "| Busiest weekday | ${busiest_weekday:-N/A} |"
+}
+
+format_text() {
+    local commits="$1" stats="$2"
+
+    echo "=== Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL} ==="
+    echo ""
+    echo "--- Stats ---"
+    echo ""
+    _stats_text "$stats"
     echo ""
 
     local bullets
@@ -1348,8 +1416,6 @@ format_text() {
 
 format_markdown() {
     local commits="$1" stats="$2"
-    local total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak
-    IFS='|' read -r total first_date last_date busiest_day busiest_count active_days avg_per_day busiest_weekday longest_streak <<< "$stats"
 
     echo "# Monthly Recap - ${REPO_NAME} - ${PERIOD_LABEL}"
     echo ""
@@ -1357,14 +1423,7 @@ format_markdown() {
     echo ""
     echo "| Metric | Value |"
     echo "|--------|-------|"
-    echo "| Total commits | ${total} |"
-    echo "| Active days | ${active_days:-0} |"
-    echo "| Avg per day | ${avg_per_day:-0.0} |"
-    echo "| Longest streak | ${longest_streak:-0} day(s) |"
-    echo "| First commit | ${first_date} |"
-    echo "| Last commit | ${last_date} |"
-    echo "| Busiest day | ${busiest_day} (${busiest_count} commits) |"
-    echo "| Busiest weekday | ${busiest_weekday:-N/A} |"
+    _stats_markdown "$stats"
     echo ""
 
     local bullets
@@ -1479,15 +1538,30 @@ output_team_text() {
     echo "  Busiest weekday: ${busiest_weekday:-N/A}"
     echo ""
 
-    local rank=0 count pct author
     echo "--- Contributors ---"
     echo ""
+    _team_ranking_text "$ranking"
+    echo ""
+    _team_authors_text "$all_commits" "$ranking"
+}
+
+# _team_ranking_text <ranking> [name width] : numbered contributor list
+_team_ranking_text() {
+    local rank=0 count pct author width="${2:-20}"
     while IFS=$'\t' read -r count pct author; do
         rank=$((rank + 1))
-        printf '  %d. %-20s %3d commits (%s%%)\n' "$rank" "$author" "$count" "$pct"
-    done <<< "$ranking"
-    echo ""
+        printf '  %d. %-*s %3d commits (%s%%)\n' "$rank" "$width" "$author" "$count" "$pct"
+    done <<< "$1"
+}
 
+# _name_width <minimum> : stdin = names, one per line → the longest length, at least <minimum>
+_name_width() {
+    awk -v w="$1" 'length($0) > w { w = length($0) } END { print w }'
+}
+
+# _team_authors_text <team rows> <ranking> : one block per contributor
+_team_authors_text() {
+    local all_commits="$1" ranking="$2" count pct author
     local ac ac_bullets
     local a_total a_busiest_day a_busiest_count a_active_days a_avg a_weekday a_streak
     while IFS=$'\t' read -r count pct author; do
@@ -1551,17 +1625,28 @@ output_team_markdown() {
     echo "| Busiest weekday | ${busiest_weekday:-N/A} |"
     echo ""
 
-    local rank=0 count pct author
     echo "## Contributors"
     echo ""
+    _team_ranking_markdown "$ranking"
+    echo ""
+    _team_authors_markdown "$all_commits" "$ranking" "##"
+}
+
+# _team_ranking_markdown <ranking> : contributor table
+_team_ranking_markdown() {
+    local rank=0 count pct author
     echo "| # | Contributor | Commits | % |"
     echo "|---|-------------|---------|---|"
     while IFS=$'\t' read -r count pct author; do
         rank=$((rank + 1))
         echo "| ${rank} | ${author//|/\\|} | ${count} | ${pct}% |"
-    done <<< "$ranking"
-    echo ""
+    done <<< "$1"
+}
 
+# _team_authors_markdown <team rows> <ranking> <heading> : one section per
+# contributor, headed at level <heading> ("##"), subsections one level below
+_team_authors_markdown() {
+    local all_commits="$1" ranking="$2" h="$3" count pct author
     local ac ac_bullets
     local a_total a_busiest_day a_busiest_count a_active_days a_avg a_streak
     while IFS=$'\t' read -r count pct author; do
@@ -1570,7 +1655,7 @@ output_team_markdown() {
         IFS='|' read -r a_total _ _ a_busiest_day a_busiest_count a_active_days a_avg _ a_streak \
             <<< "$(compute_stats "$ac")"
 
-        echo "## ${author} (${count} commits)"
+        echo "${h} ${author} (${count} commits)"
         echo ""
         echo "| Metric | Value |"
         echo "|--------|-------|"
@@ -1583,14 +1668,14 @@ output_team_markdown() {
 
         ac_bullets=$(_subjects "$ac")
         if _wants bullets && [[ -n "$ac_bullets" ]]; then
-            echo "### Changes"
+            echo "#${h} Changes"
             echo ""
             _print_bullets "$ac_bullets" "- "
             echo ""
         fi
 
         if _wants commits; then
-            echo "### Commits"
+            echo "#${h} Commits"
             echo ""
             _print_commits_markdown "$ac"
             echo ""
@@ -1697,6 +1782,480 @@ format_empty_recap() {
 }
 
 # ==============================================================================
+# Multi-repository recap
+# ==============================================================================
+# Each repository is resolved, fetched and rendered in a subshell of its own, so
+# that nothing resolved for one (user, provider, host, branch, links, token and
+# scratch files) carries over to the next. Next to its scratch files, the
+# subshell leaves in its directory:
+#   single      its single-repository recap, as `git-recap <repo>` prints it
+#   rows        its commit rows
+#   change      "added TAB deleted TAB files" when line counts are known (local)
+#   meta        name, provider, web URL, user and commit count, \x1f-separated
+#   head, body  its section of a text or markdown recap
+#   duplicate   present when the repository was already in the recap
+# The parent only reads these files: it never resolves a repository itself.
+
+MULTI_DIRS=()  # Result directories of the repositories in the recap, in order
+
+# _change_stats <rows> → "added TAB deleted TAB files", or nothing without file data
+_change_stats() {
+    [[ -n "$DETAILS_FILE" && -n "$1" ]] || return 0
+    # shellcheck disable=SC2016  # the $names below are jq variables
+    printf '%s\n' "$1" | jq -R -s -r --slurpfile d "$DETAILS_FILE" --arg mode "$ARG_MODE" "$_JQ_RECAP"'
+        rows | change_stats(details) // empty
+        | "\(.lines_added)\t\(.lines_deleted)\t\(.files_changed)"' \
+        || die "Could not read the line counts of $REPO_FULL"
+}
+
+# _no_commits_line <user prefix> <user suffix> : the empty-recap sentence
+_no_commits_line() {
+    if [[ "$ARG_TEAM" == true || -z "$3" ]]; then
+        echo "No commits found during this period."
+    else
+        printf 'No commits found for %s%s%s during this period.\n' "$1" "$3" "$2"
+    fi
+}
+
+# _mini_stats <rows> <change> <user prefix> <user suffix> : one-line stats of
+# a repository section
+_mini_stats() {
+    local rows="$1" total first_date last_date active_days line added deleted files
+    if [[ -z "$rows" ]]; then
+        _no_commits_line "$3" "$4" "$USER_NAME"
+        return 0
+    fi
+    IFS='|' read -r total first_date last_date _ _ active_days _ _ _ <<< "$(compute_stats "$rows")"
+    line="${total} commits"
+    if [[ "$ARG_TEAM" == true ]]; then
+        line+=", $(printf '%s\n' "$rows" | cut -f4 | sort -u | wc -l | tr -d ' ') contributors"
+    fi
+    line+=", ${active_days} active days, ${first_date} → ${last_date}"
+    if [[ -n "$2" ]]; then
+        IFS=$'\t' read -r added deleted files <<< "$2"
+        line+=", +${added}/-${deleted} lines in ${files} files"
+    fi
+    printf '%s\n' "$line"
+}
+
+# _section_markdown <dir> / _section_text <dir> : the repository's section,
+# with the single-repository headings one level down
+_section_markdown() {
+    local dir="$1" rows="$REPO_COMMITS" title="$REPO_FULL" bullets ranking
+    [[ -n "$REPO_WEB_URL" ]] && title="[${REPO_FULL}](${REPO_WEB_URL})"
+    printf '## %s\n\n' "$title" > "$dir/head"
+    {
+        _mini_stats "$rows" "$(cat "$dir/change")" "**" "**"
+        echo ""
+        if [[ -n "$rows" && "$ARG_MODE" != "summary" ]]; then
+            if [[ "$ARG_TEAM" == true ]]; then
+                ranking=$(_author_ranking "$rows" "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')")
+                echo "### Contributors"
+                echo ""
+                _team_ranking_markdown "$ranking"
+                echo ""
+                _team_authors_markdown "$rows" "$ranking" "###"
+            else
+                bullets=$(_subjects "$rows")
+                if _wants bullets && [[ -n "$bullets" ]]; then
+                    echo "### Changes"
+                    echo ""
+                    _print_bullets "$bullets" "- "
+                    echo ""
+                fi
+                if _wants commits; then
+                    echo "### Commits"
+                    echo ""
+                    _print_commits_markdown "$rows"
+                    echo ""
+                fi
+            fi
+        fi
+    } > "$dir/body"
+}
+
+_section_text() {
+    local dir="$1" rows="$REPO_COMMITS" bullets ranking
+    {
+        printf -- '--- %s ---\n\n' "$REPO_FULL"
+        if [[ -n "$REPO_WEB_URL" ]]; then printf '  %s\n' "$REPO_WEB_URL"; fi
+    } > "$dir/head"
+    {
+        printf '  %s\n\n' "$(_mini_stats "$rows" "$(cat "$dir/change")" "" "")"
+        if [[ -n "$rows" && "$ARG_MODE" != "summary" ]]; then
+            if [[ "$ARG_TEAM" == true ]]; then
+                ranking=$(_author_ranking "$rows" "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')")
+                echo "  Contributors:"
+                echo ""
+                _team_ranking_text "$ranking"
+                echo ""
+                _team_authors_text "$rows" "$ranking"
+            else
+                bullets=$(_subjects "$rows")
+                if _wants bullets && [[ -n "$bullets" ]]; then
+                    echo "  Changes:"
+                    _print_bullets "$bullets" "    • "
+                    echo ""
+                fi
+                if _wants commits; then
+                    echo "  Commits:"
+                    _print_commits_text "$rows" "    "
+                    echo ""
+                fi
+            fi
+        fi
+    } > "$dir/body"
+}
+
+# _multi_repo <repo> <dir> : recaps one repository into <dir> (in a subshell)
+_multi_repo() {
+    local dir="$2" provider count=0
+    # The repository's scratch files share its result directory
+    ARG_REPO="$1" WORK_DIR="$2"
+    : > "$WORK_DIR/identities"
+    recap_repo
+    if [[ "$REPO_DUPLICATE" == true ]]; then
+        : > "$dir/duplicate"
+        return 0
+    fi
+    printf '%s' "$REPO_OUTPUT" > "$dir/single"
+    : > "$dir/rows"
+    if [[ -n "$REPO_COMMITS" ]]; then
+        printf '%s\n' "$REPO_COMMITS" > "$dir/rows"
+        count=$(printf '%s\n' "$REPO_COMMITS" | wc -l | tr -d ' ')
+    fi
+    _change_stats "$REPO_COMMITS" > "$dir/change"
+    provider="$REPO_PROVIDER"
+    [[ "$REPO_MODE" == "local" ]] && provider="local"
+    printf '%s\037%s\037%s\037%s\037%s\n' "$REPO_FULL" "$provider" "$REPO_WEB_URL" "$USER_NAME" "$count" > "$dir/meta"
+    case "$ARG_FORMAT" in
+        markdown) _section_markdown "$dir" ;;
+        text)     _section_text "$dir" ;;
+    esac
+}
+
+# _multi_meta <field> → that field of every repository's meta, one per line
+# (1 name, 2 provider, 3 web URL, 4 user, 5 commit count)
+_multi_meta() {
+    local dir
+    for dir in "${MULTI_DIRS[@]}"; do
+        awk -F'\037' -v f="$1" '{ print $f }' "$dir/meta"
+    done
+}
+
+# _multi_user → the user every repository was recapped for, or nothing when
+# they differ (and in team mode)
+_multi_user() {
+    [[ "$ARG_TEAM" == false ]] || return 0
+    local users
+    users=$(_multi_meta 4 | sort -u)
+    [[ "$users" == *$'\n'* ]] || printf '%s\n' "$users"
+}
+
+# _multi_change → summed "added TAB deleted TAB files" of the repositories that
+# have line counts, or nothing
+_multi_change() {
+    local dir
+    for dir in "${MULTI_DIRS[@]}"; do cat "$dir/change"; done \
+        | awk -F'\t' 'NF == 3 { a += $1; d += $2; f += $3; n++ }
+            END { if (n) printf "%d\t%d\t%d\n", a, d, f }'
+}
+
+# _multi_table <total> → "count TAB percent TAB provider TAB name TAB web URL"
+# per repository, in argument order
+_multi_table() {
+    local dir
+    for dir in "${MULTI_DIRS[@]}"; do cat "$dir/meta"; done \
+        | awk -F'\037' -v total="$1" '{
+            printf "%d\t%.0f\t%s\t%s\t%s\n", $5, (total > 0 ? $5 / total * 100 : 0), $2, $1, $3
+        }'
+}
+
+# _multi_sections <user line format> : every section, with the user under its
+# heading when the repositories were not all recapped for the same user
+_multi_sections() {
+    local dir user=""
+    [[ "$ARG_TEAM" == true ]] || user=$(_multi_user)
+    for dir in "${MULTI_DIRS[@]}"; do
+        cat "$dir/head"
+        if [[ "$ARG_TEAM" == false && -z "$user" ]]; then
+            # shellcheck disable=SC2059  # the format is one of ours
+            printf "$1" "$(awk -F'\037' '{ print $4 }' "$dir/meta")"
+        fi
+        cat "$dir/body"
+    done
+}
+
+format_multi_text() {
+    local all="$1" stats="$2" total="${2%%|*}" n="${#MULTI_DIRS[@]}" title="Monthly Recap" user change
+    [[ "$ARG_TEAM" == true ]] && title="Team Recap"
+    user=$(_multi_user)
+    change=$(_multi_change)
+
+    echo "=== ${title} - ${n} repos - ${PERIOD_LABEL} ==="
+    echo ""
+    if [[ -z "$all" ]]; then
+        _no_commits_line "" "" "$user"
+        echo ""
+    else
+        echo "--- Stats ---"
+        echo ""
+        echo "  Repositories:    ${n}"
+        if [[ "$ARG_TEAM" == true ]]; then
+            echo "  Contributors:    $(printf '%s\n' "$all" | cut -f4 | sort -u | wc -l | tr -d ' ')"
+        fi
+        _stats_text "$stats"
+        if [[ -n "$change" ]]; then
+            local added deleted files
+            IFS=$'\t' read -r added deleted files <<< "$change"
+            echo "  Lines added:     +${added}"
+            echo "  Lines deleted:   -${deleted}"
+            echo "  Files changed:   ${files}"
+        fi
+        echo ""
+    fi
+
+    local rank=0 count pct provider name web table width
+    table=$(_multi_table "${total:-0}")
+    width=$(printf '%s\n' "$table" | cut -f4 | _name_width 30)
+    echo "--- Repositories ---"
+    echo ""
+    while IFS=$'\t' read -r count pct provider name web; do
+        rank=$((rank + 1))
+        printf '  %d. %-*s %-7s %4d commits (%s%%)\n' "$rank" "$width" "$name" "$provider" "$count" "$pct"
+    done <<< "$table"
+    echo ""
+    [[ -n "$all" ]] || return 0
+
+    if [[ "$ARG_TEAM" == true ]]; then
+        local ranking
+        ranking=$(_author_ranking "$all" "$total")
+        echo "--- Contributors ---"
+        echo ""
+        _team_ranking_text "$ranking" "$(printf '%s\n' "$ranking" | cut -f3- | _name_width 20)"
+        echo ""
+    fi
+    _multi_sections '  User: %s\n'
+}
+
+format_multi_markdown() {
+    local all="$1" stats="$2" total="${2%%|*}" n="${#MULTI_DIRS[@]}" title="Monthly Recap" user change
+    [[ "$ARG_TEAM" == true ]] && title="Team Recap"
+    user=$(_multi_user)
+    change=$(_multi_change)
+
+    echo "# ${title} - ${n} repos - ${PERIOD_LABEL}"
+    echo ""
+    if [[ -z "$all" ]]; then
+        _no_commits_line "**" "**" "$user"
+        echo ""
+    else
+        echo "## Stats"
+        echo ""
+        echo "| Metric | Value |"
+        echo "|--------|-------|"
+        echo "| Repositories | ${n} |"
+        if [[ "$ARG_TEAM" == true ]]; then
+            echo "| Contributors | $(printf '%s\n' "$all" | cut -f4 | sort -u | wc -l | tr -d ' ') |"
+        fi
+        _stats_markdown "$stats"
+        if [[ -n "$change" ]]; then
+            local added deleted files
+            IFS=$'\t' read -r added deleted files <<< "$change"
+            echo "| Lines added | +${added} |"
+            echo "| Lines deleted | -${deleted} |"
+            echo "| Files changed | ${files} |"
+        fi
+        echo ""
+    fi
+
+    local rank=0 count pct provider name web
+    echo "## Repositories"
+    echo ""
+    echo "| # | Repository | Provider | Commits | % |"
+    echo "|---|------------|----------|---------|---|"
+    while IFS=$'\t' read -r count pct provider name web; do
+        rank=$((rank + 1))
+        name="${name//|/\\|}"
+        [[ -n "$web" ]] && name="[${name}](${web})"
+        echo "| ${rank} | ${name} | ${provider} | ${count} | ${pct}% |"
+    done <<< "$(_multi_table "${total:-0}")"
+    echo ""
+    [[ -n "$all" ]] || return 0
+
+    if [[ "$ARG_TEAM" == true ]]; then
+        echo "## Contributors"
+        echo ""
+        _team_ranking_markdown "$(_author_ranking "$all" "$total")"
+        echo ""
+    fi
+    _multi_sections 'User: **%s**\n\n'
+}
+
+# format_multi_json : one document whose repos[] are the single-repository
+# documents, as `git-recap -f json <repo>` prints them
+format_multi_json() {
+    local all="$1" stats="$2" dir change added deleted files change_json=null author
+    for dir in "${MULTI_DIRS[@]}"; do cat "$dir/single"; echo; done > "$WORK_DIR/repos.json"
+    change=$(_multi_change)
+    if [[ -n "$change" ]]; then
+        IFS=$'\t' read -r added deleted files <<< "$change"
+        change_json="{\"lines_added\":${added},\"lines_deleted\":${deleted},\"files_changed\":${files}}"
+    fi
+
+    # Team: contributors across repositories, by commit count
+    : > "$WORK_DIR/authors.json"
+    : > "$WORK_DIR/author_stats.json"
+    if [[ "$ARG_TEAM" == true && -n "$all" ]]; then
+        local authors
+        authors=$(_author_ranking "$all" "${stats%%|*}" | cut -f3-)
+        printf '%s\n' "$authors" | jq -R 'select(length > 0)' > "$WORK_DIR/authors.json" \
+            || die "Could not build the JSON output"
+        while IFS= read -r author; do
+            [[ -z "$author" ]] && continue
+            _stats_json "$(compute_stats "$(_author_commits "$all" "$author")")"
+        done <<< "$authors" > "$WORK_DIR/author_stats.json"
+    fi
+
+    # shellcheck disable=SC2016  # the $names below are jq variables
+    jq -n \
+        --slurpfile repos "$WORK_DIR/repos.json" \
+        --slurpfile authors "$WORK_DIR/authors.json" \
+        --slurpfile author_stats "$WORK_DIR/author_stats.json" \
+        --argjson aliases "$(_identity_aliases)" \
+        --argjson d '[]' \
+        --arg mode "$ARG_MODE" \
+        --arg period "$PERIOD_LABEL" \
+        --arg since "$SINCE" \
+        --arg until "$UNTIL" \
+        --arg user "$(_multi_user)" \
+        --arg team "$ARG_TEAM" \
+        --argjson change "$change_json" \
+        --argjson stats "$(_stats_json "$stats")" \
+        "$_JQ_RECAP"'
+        {repos_count: ($repos | length), period: $period, since: $since, until: $until}
+        + (if $user != "" then {user: $user} else {} end)
+        + (if $team == "true" then {team: true} else {} end)
+        + {stats: ($stats | stats_object
+            | if $team == "true" then to_entries
+                | .[0:1] + [{key: "contributors", value: ($authors | length)}] + .[1:]
+                | from_entries else . end
+            | if $change then . + $change else . end)}
+        + (if $team == "true" then {contributors: [
+            range(0; $authors | length) as $i
+            | {user: $authors[$i], aliases: ($aliases[$authors[$i]] // []),
+               stats: ($author_stats[$i] | stats_object)}
+          ]} else {} end)
+        + {repos: $repos}' \
+        || die "Could not build the JSON output"
+}
+
+# _identity_map <team rows> → "key TAB display name" for every author key of
+# the rows. One person shows up under several keys across providers (a GitHub
+# login, a GitLab or local commit name): keys are merged (union-find) when they
+# share a commit name or an email, or when they are equal once lowercased down
+# to [a-z0-9]. A GitHub noreply email only stands for its login. A merged
+# person is named after their GitHub login if any, else their most used key.
+_identity_map() {
+    local dir
+    {
+        printf '%s\n' "$1"
+        echo "--identities--"
+        for dir in "${MULTI_DIRS[@]}"; do cat "$dir/identities"; done
+    } | awk -F'\t' -v no_author="$NO_AUTHOR" '
+        function find(x) { while (parent[x] != x) x = parent[x]; return x }
+        function union(a, b) { a = find(a); b = find(b); if (a != b) parent[b] = a }
+        function norm(s) { s = tolower(s); gsub(/[^a-z0-9]/, "", s); return s }
+        function link(kind, value, key) {
+            if (value == "") return
+            if ((kind SUBSEP value) in owner) union(owner[kind SUBSEP value], key)
+            else owner[kind SUBSEP value] = key
+        }
+        $0 == "--identities--" { ids = 1; next }
+        !ids { if ($0 != "") { count[$4]++; parent[$4] = $4 } next }
+        !($1 in count) { next }
+        {
+            key = $1
+            if ($4 == "1") login[key] = 1
+            if ($2 != no_author) { link("name", $2, key); link("norm", norm($2), key) }
+            if (key != no_author) link("norm", norm(key), key)
+            email = tolower($3)
+            if (email ~ /@users\.noreply\.github\.com$/) {
+                sub(/@.*/, "", email); sub(/^[0-9]+\+/, "", email)
+                link("norm", norm(email), key)
+            } else link("email", email, key)
+        }
+        END {
+            for (k in parent) {
+                r = find(k); l = (k in login) ? 1 : 0; c = count[k]
+                if (!(r in best) || l > best_l[r] || (l == best_l[r] && (c > best_c[r] \
+                    || (c == best_c[r] && (k "") < (best[r] ""))))) {
+                    best[r] = k; best_l[r] = l; best_c[r] = c
+                }
+            }
+            for (k in parent) print k "\t" best[find(k)]
+        }' | sort
+}
+
+# _identity_aliases → JSON object: display name → the other keys merged into it
+_identity_aliases() {
+    if [[ -s "$WORK_DIR/identity.map" ]]; then
+        jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | select(.[0] != .[1]))
+            | group_by(.[1]) | map({key: .[0][1], value: (map(.[0]) | sort)}) | from_entries' \
+            "$WORK_DIR/identity.map" || die "Could not build the JSON output"
+    else
+        echo '{}'
+    fi
+}
+
+# recap_multi : recap of every <repo> argument: global stats, then one
+# section per repository. Any failing repository stops the whole run.
+recap_multi() {
+    WORK_DIR=$(mktemp -d)
+    MULTI_SEEN="$WORK_DIR/seen"
+    : > "$MULTI_SEEN"
+
+    local i=0 rc arg dir
+    for arg in "${ARG_REPOS[@]}"; do
+        i=$((i + 1))
+        dir=$(mktemp -d "$WORK_DIR/repo-$i.XXXXXX")
+        info "[$i/$ARG_REPO_COUNT] $arg"
+        # set -e is turned back on inside: "( ... ) || die" would disable it there
+        set +e
+        ( set -e; _multi_repo "$arg" "$dir" )
+        rc=$?
+        set -e
+        [[ $rc -eq 0 ]] || die "Could not recap $arg (repository $i of $ARG_REPO_COUNT): no recap was produced"
+        [[ -f "$dir/duplicate" ]] || MULTI_DIRS+=("$dir")
+    done
+
+    # Arguments that all name the same repository: its own recap
+    local output
+    if [[ ${#MULTI_DIRS[@]} -eq 1 ]]; then
+        output=$(cat "${MULTI_DIRS[0]}/single"; printf x)
+        _write_output "${output%x}"
+        return 0
+    fi
+
+    local all="" stats=""
+    all=$(for dir in "${MULTI_DIRS[@]}"; do cat "$dir/rows"; done)
+    stats=$(compute_stats "$all")
+    # Team: one name per person across repositories (the sections keep their own)
+    : > "$WORK_DIR/identity.map"
+    if [[ "$ARG_TEAM" == true && -n "$all" ]]; then
+        _identity_map "$all" > "$WORK_DIR/identity.map"
+        all=$(printf '%s\n' "$all" | awk -F'\t' -v OFS='\t' \
+            'NR == FNR { name[$1] = $2; next } ($4 in name) { $4 = name[$4] } { print }' "$WORK_DIR/identity.map" -)
+    fi
+    case "$ARG_FORMAT" in
+        markdown) output=$(format_multi_markdown "$all" "$stats") || exit 1 ;;
+        json)     output=$(format_multi_json "$all" "$stats") || exit 1 ;;
+        *)        output=$(format_multi_text "$all" "$stats") || exit 1 ;;
+    esac
+    _write_output "$output"
+}
+
+# ==============================================================================
 # Main
 # ==============================================================================
 
@@ -1726,6 +2285,37 @@ main() {
     # Compute period (first: a bad period must fail before any network call)
     compute_period
 
+    if [[ $ARG_REPO_COUNT -gt 1 ]]; then
+        recap_multi
+    else
+        recap_repo
+        _write_output "$REPO_OUTPUT"
+    fi
+}
+
+# _write_output <recap> : to -o's file, or stdout
+_write_output() {
+    if [[ -n "$ARG_OUTPUT" ]]; then
+        printf '%s\n' "$1" > "$ARG_OUTPUT"
+        info "Output written to $ARG_OUTPUT"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+# _repo_key → what identifies the resolved repository (provider, host, path)
+_repo_key() {
+    if [[ "$REPO_MODE" == "local" ]]; then
+        printf 'local\t%s\n' "$LOCAL_REPO_DIR"
+    else
+        printf '%s\t%s\t%s\n' "$REPO_PROVIDER" "$REPO_HOST" "$REPO_FULL" | tr '[:upper:]' '[:lower:]'
+    fi
+}
+
+# recap_repo : resolves, fetches and renders ARG_REPO into REPO_COMMITS and
+# REPO_OUTPUT. In a multi-repo recap, a repository already seen sets
+# REPO_DUPLICATE instead, before anything is fetched.
+recap_repo() {
     # Resolve user: CLI flag > config > auto-detect
     if [[ "$ARG_TEAM" == true ]]; then
         # In team mode the user only serves to complete a bare repo name:
@@ -1754,10 +2344,22 @@ main() {
     # Resolve repo
     resolve_repo
 
+    if [[ -n "$MULTI_SEEN" ]]; then
+        local key
+        key=$(_repo_key)
+        # The key goes through the environment (awk -v would read its backslashes)
+        if KEY="$key" awk '$0 == ENVIRON["KEY"] { found = 1 } END { exit !found }' "$MULTI_SEEN"; then
+            warn "Skipping $REPO_FULL: already in the recap"
+            REPO_DUPLICATE=true
+            return 0
+        fi
+        printf '%s\n' "$key" >> "$MULTI_SEEN"
+    fi
+
     # Check deps
     check_dependencies
 
-    WORK_DIR=$(mktemp -d)
+    [[ -n "$WORK_DIR" ]] || WORK_DIR=$(mktemp -d)
 
     if [[ "$ARG_TEAM" == false && -z "$USER_NAME" ]]; then
         USER_NAME=$(detect_gitlab_user)
@@ -1768,8 +2370,9 @@ main() {
     # Detect branch
     detect_default_branch
 
-    # JSON output carries commit bodies (and changed files for local repos)
-    if [[ "$ARG_FORMAT" == "json" ]]; then
+    # JSON output carries commit bodies (and changed files for local repos);
+    # a multi-repo recap also reads the line counts from them
+    if [[ "$ARG_FORMAT" == "json" ]] || { [[ -n "$MULTI_SEEN" ]] && command -v jq &>/dev/null; }; then
         DETAILS_FILE="$WORK_DIR/details.jsonl"
         : > "$DETAILS_FILE"
     fi
@@ -1792,14 +2395,7 @@ main() {
     else
         output=$(format_recap "$commits") || exit 1
     fi
-
-    # Write or print
-    if [[ -n "$ARG_OUTPUT" ]]; then
-        printf '%s\n' "$output" > "$ARG_OUTPUT"
-        info "Output written to $ARG_OUTPUT"
-    else
-        printf '%s\n' "$output"
-    fi
+    REPO_COMMITS="$commits" REPO_OUTPUT="$output"
 }
 
 main "$@"
