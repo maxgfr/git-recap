@@ -41,9 +41,12 @@ chmod +x /usr/local/bin/git-recap
 
 - `git`
 - `gh` (GitHub CLI, authenticated, for remote GitHub repositories)
-- `jq` (required for `-f json` and `curl` fallback)
+- `jq` (required for `-f json`, the `curl` fallback and GitLab)
+- `curl` (for GitLab projects)
 
 Without `gh`, remote repositories are read through `curl` and the public GitHub API. Set `GH_TOKEN` (or `GITHUB_TOKEN`) to raise the rate limit from 60 to 5000 requests an hour and to read private repositories.
+
+GitLab projects (gitlab.com or a self-hosted instance) are read through the GitLab REST API with `curl`: any `https://<host>/<group>/.../<project>` or `git@<host>:<group>/.../<project>.git` URL whose host is not github.com is assumed to be GitLab, nested groups and browser URLs (`/-/tree/main`) included. Well-known other forges (bitbucket.org, codeberg.org, gitea.com, Azure DevOps, sourceforge.net) are not supported remotely: clone the repository and pass its local path (its commits then have no links). Public projects need no token. For private projects, set `GITLAB_TOKEN` (or `GL_TOKEN`) to a token with the `read_api` scope. If neither is set and `glab` is installed, the token `glab` stores for that host is reused (`glab auth login --hostname <host>`). The token is sent in a header and never appears on a command line.
 
 ## Usage
 
@@ -51,10 +54,12 @@ Without `gh`, remote repositories are read through `curl` and the public GitHub 
 git-recap [OPTIONS] <repo>
 
 Arguments:
-  <repo>              GitHub URL, owner/repo, repo name, SSH URL, or local path (.)
+  <repo>              GitHub URL, owner/repo, repo name, SSH URL, GitLab URL
+                      (gitlab.com or self-hosted), or local path (.)
 
 Options:
-  -u, --user <user>       GitHub username (auto-detected via gh)
+  -u, --user <user>       GitHub username (auto-detected via gh); for GitLab,
+                          the commit author name or email
   -p, --period <period>   Period (default: current-month). Values:
                            current-month, last-month, current-week, last-week,
                            current-year, last-year, all, <N>, YYYY-MM, YYYY
@@ -97,7 +102,7 @@ Weeks run Monday to Sunday. Invalid periods and dates (`-p 2026-13`, `--since 20
 
 Merge commits, bot authors (`*[bot]`, `*-bot`, such as `dependabot[bot]` or `semantic-release-bot`) and release commits (`chore(release): …`, bare version numbers) are skipped by default. The number of skipped commits is reported on stderr. Use `--all-commits` to keep them, and `--exclude-author "<name or glob>"` to leave specific people out of a team recap (a literal name such as `dependabot[bot]` works too).
 
-For local repositories, `-u` is matched against author names and emails as a plain substring; for GitHub repositories it is a GitHub login or email. `--all-branches` reads local branches, remote-tracking branches, tags and HEAD (not the stash). For local repositories, `-b` also takes any revision or range git accepts (`main~10..main`, `HEAD^!`). For GitHub repositories, `-b` is a branch, tag or commit SHA, and `--all-branches` reads branches only.
+For local repositories, `-u` is matched against author names and emails as a plain substring; for GitHub repositories it is a GitHub login or email. For GitLab projects it is a commit author name or email; without `-u` or `GIT_RECAP_USER`, it is the commit email (or email, or name) of the token's user, and otherwise your global `git config user.email`. `--all-branches` reads local branches, remote-tracking branches, tags and HEAD (not the stash). For local repositories, `-b` also takes any revision or range git accepts (`main~10..main`, `HEAD^!`). For GitHub and GitLab repositories, `-b` is a branch, tag or commit SHA, and `--all-branches` reads branches only.
 
 ### Team Mode
 
@@ -148,6 +153,11 @@ git-recap --team maxgfr/subtool
 git-recap https://github.com/maxgfr/subtool
 git-recap git@github.com:maxgfr/subtool.git
 
+# GitLab: gitlab.com or self-hosted, nested groups, browser URLs
+git-recap https://gitlab.com/group/project
+git-recap git@gitlab.com:group/project.git
+GITLAB_TOKEN=glpat-... git-recap https://gitlab.example.org/group/subgroup/project/-/tree/main
+
 # Local repo
 git-recap .
 
@@ -187,7 +197,7 @@ git recap maxgfr/subtool
 
 ### Markdown
 
-Stats table, bullet list, and commit table. Hashes link to GitHub when the repository has a GitHub remote. A `|` inside a table cell is written as `\|`.
+Stats table, bullet list, and commit table. Hashes link to the commit on GitHub or GitLab (`/-/commit/`) for remote repositories, and for local repositories whose `origin` points to one of them. A `|` inside a table cell is written as `\|`.
 
 ### JSON
 

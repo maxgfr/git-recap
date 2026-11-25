@@ -1,6 +1,6 @@
 ---
 name: git-recap
-description: Generate a work recap from git commits — a written summary plus clean bullet points, for one person or a whole team, over a period (this month, last week, a year...). Use when the user asks for a recap, standup update, weekly report, release changelog, client/activity report, or "what did I/we do" over a period on a local or GitHub repository.
+description: Generate a work recap from git commits — a written summary plus clean bullet points, for one person or a whole team, over a period (this month, last week, a year...). Use when the user asks for a recap, standup update, weekly report, release changelog, client/activity report, or "what did I/we do" over a period on a local, GitHub or GitLab repository.
 ---
 
 # git-recap
@@ -9,16 +9,16 @@ The `git-recap` CLI collects commits and stats deterministically and never calls
 
 ## 1. Find the CLI
 
-Use `git-recap` if it is on the `PATH`. Otherwise use the copy bundled with this skill: `bash <skill-dir>/scripts/git-recap.sh`. Requirements: `git` and `jq`, plus an authenticated `gh` for remote GitHub repositories.
+Use `git-recap` if it is on the `PATH`. Otherwise use the copy bundled with this skill: `bash <skill-dir>/scripts/git-recap.sh`. Requirements: `git` and `jq`, plus an authenticated `gh` for remote GitHub repositories, and `curl` for GitLab projects (private ones need `GITLAB_TOKEN` with the `read_api` scope, or a `glab` login for that host).
 
 ## 2. Map the request to flags
 
 | Request | Flag |
 |---------|------|
-| Repository (default: current directory `.`) | `<repo>`: local path, `owner/repo`, GitHub URL, SSH URL |
+| Repository (default: current directory `.`) | `<repo>`: local path, `owner/repo`, GitHub URL, SSH URL, GitLab URL (gitlab.com or self-hosted, nested groups) |
 | Period (default `current-month`) | `-p current-month\|last-month\|current-week\|last-week\|current-year\|last-year\|all\|<N months>\|YYYY-MM\|YYYY` |
 | Custom range (sprint, billing period, "since Monday"...) | `--since YYYY-MM-DD [--until YYYY-MM-DD]` (inclusive; not combined with `-p`) |
-| Specific author | `-u <user>` (auto-detected otherwise) |
+| Specific author | `-u <user>` (auto-detected otherwise; a commit author name or email for GitLab) |
 | Whole team, grouped by author | `--team` |
 | Leave someone out of a team recap | `--exclude-author <glob>` (repeatable, case-insensitive) |
 | Branch / all branches | `-b <branch>` / `--all-branches` |

@@ -226,6 +226,7 @@ assert_eq "_urlencode keeps unreserved characters and slashes" "feature/a-b_c.d~
 assert_eq "_urlencode escapes query delimiters" "feature/%23123%20a%26b%2Bc%3Dd%25" "$(_urlencode "feature/#123 a&b+c=d%")"
 assert_eq "_urlencode escapes brackets" "dependabot%5Bbot%5D" "$(_urlencode "dependabot[bot]")"
 assert_eq "_urlencode escapes UTF-8 bytes" "%C3%A9t%C3%A9" "$(_urlencode "été")"
+assert_eq "_urlencode all escapes slashes (GitLab project id)" "a%2Fb.c%2Fd-e" "$(_urlencode "a/b.c/d-e" all)"
 
 echo "$(_bold "  compute_period")"
 
@@ -301,6 +302,18 @@ assert_eq "extra path segments are rejected" "died" "$(_resolve "owner/repo/extr
 assert_eq "characters GitHub does not allow are rejected" "died" "$(_resolve "owner/re po?x=1")"
 assert_eq "missing absolute path is not a GitHub repo" "died" "$(_resolve "/no/such/path")"
 assert_eq "missing relative path is not a GitHub repo" "died" "$(_resolve "./nope")"
+assert_eq "GitLab browser URL keeps nested groups up to /-/" "a/b/c/proj|proj|https://gitlab.example.org/a/b/c/proj" \
+    "$(_resolve "https://gitlab.example.org/a/b/c/proj/-/tree/main")"
+assert_eq "GitLab URL with .git and trailing slash" "group/proj|proj|https://gitlab.com/group/proj" \
+    "$(_resolve "https://gitlab.com/group/proj.git/")"
+assert_eq "GitLab SSH URL" "group/sub/proj|proj|https://gitlab.com/group/sub/proj" "$(_resolve "git@gitlab.com:group/sub/proj.git")"
+assert_eq "GitLab URL needs a group and a project" "died" "$(_resolve "https://gitlab.example.org/proj")"
+assert_eq "GitLab URL with characters GitLab does not allow is rejected" "died" "$(_resolve "https://gitlab.example.org/a/b%20c")"
+assert_eq "GitLab commit links use /-/commit/" "https://gitlab.com/group/proj/-/commit/" \
+    "$( (ARG_REPO="https://gitlab.com/group/proj"; resolve_repo 2>/dev/null; echo "$REPO_COMMIT_URL") )"
+# shellcheck disable=SC2034  # read by resolve_repo
+assert_eq "GitHub commit links use /commit/" "https://github.com/owner/repo/commit/" \
+    "$( (ARG_REPO="owner/repo"; resolve_repo 2>/dev/null; echo "$REPO_COMMIT_URL") )"
 
 echo ""
 
@@ -1169,6 +1182,195 @@ assert_not_contains "curl fallback sends no token when none is set" "$(cat "$reg
 err=$(_curl_run --team -p all barename 2>&1 >/dev/null)
 assert_eq "bare repo name without a user exits 1" "1" "$?"
 assert_contains "bare repo name without a user is reported" "$err" "without a GitHub user"
+
+# GitLab: a sandboxed PATH (no gh, no glab) with a curl mock of the API v4
+#   GL_MOCK_STATUS          HTTP status to answer with (default: 200)
+#   GL_MOCK_DEFAULT_BRANCH  default branch of the project, as JSON (default: "main")
+#   GL_MOCK_LOG             file receiving one line per URL requested
+#   GL_MOCK_ARGV            file receiving the argv of every call
+#   GL_MOCK_HEADERS         file receiving the header files passed with -H @file
+# Commits of main come in two pages (normal commit with a body, merge, release
+# commit; then a second author); dev shares one commit with main.
+gl_bin="$reg_dir/gl-bin"
+mkdir -p "$gl_bin"
+for tool in bash env git jq sed cut tr awk sort uniq wc head tail cat mktemp rm basename date; do
+    ln -s "$(command -v "$tool")" "$gl_bin/$tool"
+done
+cat > "$gl_bin/curl" <<'MOCK_CURL'
+#!/usr/bin/env bash
+body=/dev/null headers=/dev/null url=""
+[[ -n "${GL_MOCK_ARGV:-}" ]] && printf '%s\n' "$*" >> "$GL_MOCK_ARGV"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -H) [[ "$2" == @* && -n "${GL_MOCK_HEADERS:-}" ]] && cat "${2#@}" >> "$GL_MOCK_HEADERS"; shift 2 ;;
+        -o) body="$2"; shift 2 ;;
+        -D) headers="$2"; shift 2 ;;
+        -w) shift 2 ;;
+        -*) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+[[ -n "${GL_MOCK_LOG:-}" ]] && printf '%s\n' "$url" >> "$GL_MOCK_LOG"
+status="${GL_MOCK_STATUS:-200}"
+: > "$headers"
+path="${url%%\?*}"
+if [[ "$status" != 200 ]]; then
+    printf '%s\n' '{"message":"404 Project Not Found"}' > "$body"
+elif [[ "$path" == */api/v4/user ]]; then
+    printf '%s\n' '{"name":"Gitlab Tester","email":"","commit_email":"gl@example.org"}' > "$body"
+elif [[ "$path" == */repository/branches ]]; then
+    printf '%s\n' '[{"name":"main"},{"name":"dev"}]' > "$body"
+elif [[ "$path" == */repository/commits && "$url" == *"page=2"* ]]; then
+    printf '%s\n' '[{"id": "3333333cccc", "parent_ids": ["p0"], "author_name": "Jane Doe",
+        "authored_date": "2025-03-01T09:00:00.000+01:00", "message": "fix: second gitlab page\n"}]' > "$body"
+elif [[ "$path" == */repository/commits && "$url" == *"ref_name=dev"* ]]; then
+    printf '%s\n' '[{"id": "4444444dddd", "parent_ids": ["p0"], "author_name": "Gitlab Tester",
+        "authored_date": "2025-03-05T10:00:00.000+01:00", "message": "feat: dev only"},
+      {"id": "1111111aaaa", "parent_ids": ["p0"], "author_name": "Gitlab Tester",
+        "authored_date": "2025-03-02T10:00:00.000+01:00", "message": "feat: gitlab feature\n\nGitLab body"}]' > "$body"
+elif [[ "$path" == */repository/commits ]]; then
+    printf '%s\n' '[{"id": "1111111aaaa", "parent_ids": ["p0"], "author_name": "Gitlab Tester",
+        "authored_date": "2025-03-02T10:00:00.000+01:00", "message": "feat: gitlab feature\n\nGitLab body"},
+      {"id": "2222222bbbb", "parent_ids": ["p0", "p1"], "author_name": "Gitlab Tester",
+        "authored_date": "2025-03-03T10:00:00.000+01:00", "message": "Merge branch '\''x'\'' into '\''main'\''"},
+      {"id": "5555555eeee", "parent_ids": ["p0"], "author_name": "Release Bot",
+        "authored_date": "2025-03-04T10:00:00.000+01:00", "message": "chore(release): 1.2.0"}]' > "$body"
+    printf 'link: <%s&page=2>; rel="next", <%s&page=1>; rel="first"\r\n' "$url" "$url" > "$headers"
+else
+    printf '{"default_branch": %s}\n' "${GL_MOCK_DEFAULT_BRANCH:-\"main\"}" > "$body"
+fi
+printf '%s' "$status"
+MOCK_CURL
+chmod +x "$gl_bin/curl"
+gl_url="https://gitlab.example.org/a/b/c/proj/-/tree/main"
+_gl_run() { env -u GITLAB_TOKEN -u GL_TOKEN PATH="$gl_bin" HOME="$reg_home" "$GIT_RECAP" "$@"; }
+
+out=$(GL_MOCK_LOG="$reg_dir/gl.log" _gl_run -f json -p all -u "Gitlab Tester" "$gl_url" 2>"$reg_dir/gl.err")
+assert_contains "GitLab URL resolves its nested project" "$(cat "$reg_dir/gl.err")" "Repo: a/b/c/proj (GitLab: gitlab.example.org)"
+assert_contains "GitLab fetch says which API it uses" "$(cat "$reg_dir/gl.err")" "(gitlab api (gitlab.example.org))"
+assert_contains "GitLab asks the project for its default branch" "$(cat "$reg_dir/gl.log")" \
+    "https://gitlab.example.org/api/v4/projects/a%2Fb%2Fc%2Fproj"
+assert_contains "GitLab lists commits of the encoded project, filtered by author" "$(cat "$reg_dir/gl.log")" \
+    "https://gitlab.example.org/api/v4/projects/a%2Fb%2Fc%2Fproj/repository/commits?ref_name=main&author=Gitlab%20Tester&per_page=100"
+assert_eq "GitLab rows skip merges and release commits, and follow pagination" "1111111,3333333" \
+    "$(echo "$out" | jq -r '[.commits[].hash] | join(",")')"
+assert_eq "GitLab rows keep the authored date" "2025-03-02" "$(echo "$out" | jq -r '.commits[0].date')"
+assert_eq "GitLab rows keep commit bodies" "GitLab body" "$(echo "$out" | jq -r '.commits[0].body')"
+assert_eq "GitLab JSON names the project by its full path" "a/b/c/proj|proj" "$(echo "$out" | jq -r '"\(.repo)|\(.repo_name)"')"
+
+rm -f "$reg_dir/gl.log"
+GL_MOCK_LOG="$reg_dir/gl.log" _gl_run -p all -u "Gitlab Tester" git@gitlab.com:group/proj.git >/dev/null 2>"$reg_dir/gl.err"
+assert_eq "GitLab SSH URL exits 0" "0" "$?"
+assert_contains "GitLab SSH URL resolves" "$(cat "$reg_dir/gl.err")" "Repo: group/proj (GitLab: gitlab.com)"
+assert_contains "GitLab SSH URL calls the host's API" "$(cat "$reg_dir/gl.log")" "https://gitlab.com/api/v4/projects/group%2Fproj/repository/commits?"
+
+out=$(_gl_run --team -f json -p all "$gl_url" 2>/dev/null)
+assert_eq "GitLab --team groups commits by author name" "Gitlab Tester,Jane Doe" \
+    "$(echo "$out" | jq -r '[.contributors[].user] | sort | join(",")')"
+
+rm -f "$reg_dir/gl.log"
+out=$(GL_MOCK_LOG="$reg_dir/gl.log" _gl_run --all-branches -f json -p all -u "Gitlab Tester" "$gl_url" 2>/dev/null)
+assert_eq "GitLab --all-branches lists each commit once, newest first" "4444444,1111111,3333333" \
+    "$(echo "$out" | jq -r '[.commits[].hash] | join(",")')"
+assert_contains "GitLab --all-branches reads the branch list" "$(cat "$reg_dir/gl.log")" "/repository/branches?per_page=100"
+assert_not_contains "GitLab --all-branches never sends a placeholder branch" "$(cat "$reg_dir/gl.log")" "__all__"
+
+# Credentials: GITLAB_TOKEN, GL_TOKEN, then glab's token, always in a header file
+rm -f "$reg_dir/gl.argv" "$reg_dir/gl.headers"
+GITLAB_TOKEN="gl-secret-123" GL_MOCK_ARGV="$reg_dir/gl.argv" GL_MOCK_HEADERS="$reg_dir/gl.headers" \
+    PATH="$gl_bin" HOME="$reg_home" "$GIT_RECAP" -p all -u "Gitlab Tester" "$gl_url" >/dev/null 2>&1
+assert_contains "GitLab sends GITLAB_TOKEN" "$(cat "$reg_dir/gl.headers")" "Authorization: Bearer gl-secret-123"
+assert_not_contains "GitLab keeps the token off the command line" "$(cat "$reg_dir/gl.argv")" "gl-secret-123"
+rm -f "$reg_dir/gl.headers"
+env -u GITLAB_TOKEN GL_TOKEN="gl-other-456" GL_MOCK_HEADERS="$reg_dir/gl.headers" \
+    PATH="$gl_bin" HOME="$reg_home" "$GIT_RECAP" -p all -u "Gitlab Tester" "$gl_url" >/dev/null 2>&1
+assert_contains "GitLab falls back to GL_TOKEN" "$(cat "$reg_dir/gl.headers")" "Authorization: Bearer gl-other-456"
+rm -f "$reg_dir/gl.headers"
+GL_MOCK_HEADERS="$reg_dir/gl.headers" _gl_run -p all -u "Gitlab Tester" "$gl_url" >/dev/null 2>&1
+assert_not_contains "GitLab sends no token when none is found" "$(cat "$reg_dir/gl.headers" 2>/dev/null)" "Authorization"
+glab_bin="$reg_dir/glab-bin"
+mkdir -p "$glab_bin"
+printf '#!/usr/bin/env bash\n[[ "$*" == "config get token --host gitlab.example.org" ]] && echo glab-token-789\n' > "$glab_bin/glab"
+chmod +x "$glab_bin/glab"
+rm -f "$reg_dir/gl.headers"
+env -u GITLAB_TOKEN -u GL_TOKEN GL_MOCK_HEADERS="$reg_dir/gl.headers" \
+    PATH="$glab_bin:$gl_bin" HOME="$reg_home" "$GIT_RECAP" -p all -u "Gitlab Tester" "$gl_url" >/dev/null 2>&1
+assert_contains "GitLab reuses the glab token of the host" "$(cat "$reg_dir/gl.headers")" "Authorization: Bearer glab-token-789"
+
+# User: the token owner's commit email, else the global git email
+rm -f "$reg_dir/gl.log"
+err=$(GITLAB_TOKEN="gl-secret-123" GL_MOCK_LOG="$reg_dir/gl.log" PATH="$gl_bin" HOME="$reg_home" \
+    "$GIT_RECAP" -p all "$gl_url" 2>&1 >/dev/null)
+assert_contains "GitLab user defaults to the token owner's commit email" "$err" "User: gl@example.org"
+assert_contains "GitLab filters by that email" "$(cat "$reg_dir/gl.log")" "author=gl%40example.org"
+mkdir -p "$reg_dir/glhome"
+printf '[user]\n\temail = global@example.org\n' > "$reg_dir/glhome/.gitconfig"
+err=$(env -u GITLAB_TOKEN -u GL_TOKEN PATH="$gl_bin" HOME="$reg_dir/glhome" "$GIT_RECAP" -p all "$gl_url" 2>&1 >/dev/null)
+assert_contains "GitLab user without a token is the global git email" "$err" "User: global@example.org"
+mkdir -p "$reg_dir/glhome-empty"
+err=$(env -u GITLAB_TOKEN -u GL_TOKEN PATH="$gl_bin" HOME="$reg_dir/glhome-empty" "$GIT_RECAP" -p all "$gl_url" 2>&1 >/dev/null)
+assert_eq "GitLab without any user exits 1" "1" "$?"
+assert_contains "GitLab without any user says how to set one" "$err" "Could not detect the GitLab user"
+
+# Errors
+err=$(GL_MOCK_STATUS=401 _gl_run -p all -u x "$gl_url" 2>&1 >/dev/null)
+assert_eq "GitLab exits 1 on an HTTP error" "1" "$?"
+assert_contains "GitLab 401 points to GITLAB_TOKEN and glab" "$err" \
+    "GitLab rejected the credentials for gitlab.example.org. Set GITLAB_TOKEN (scope read_api) or run: glab auth login --hostname gitlab.example.org"
+err=$(GL_MOCK_STATUS=404 _gl_run --team -p all "$gl_url" 2>&1 >/dev/null)
+assert_contains "GitLab 404 reports a missing (or private) project" "$err" \
+    "Project not found: a/b/c/proj on gitlab.example.org (private projects need GITLAB_TOKEN)"
+err=$(GL_MOCK_STATUS=429 _gl_run --team -p all "$gl_url" 2>&1 >/dev/null)
+assert_contains "GitLab 429 reports a rate limit" "$err" "Access denied (rate limit or permissions)"
+err=$(_gl_run --team -p all "https://gitlab.example.org/lonely" 2>&1 >/dev/null)
+assert_eq "GitLab URL without a group exits 1" "1" "$?"
+assert_contains "GitLab URL without a group is reported" "$err" "Invalid GitLab project"
+
+# An empty project has no default branch: empty recap, no commits request
+rm -f "$reg_dir/gl.log"
+out=$(GL_MOCK_DEFAULT_BRANCH=null GL_MOCK_LOG="$reg_dir/gl.log" _gl_run --team -p all "$gl_url" 2>/dev/null)
+assert_eq "GitLab empty project exits 0" "0" "$?"
+assert_contains "GitLab empty project gives an empty recap" "$out" "No commits found"
+assert_not_contains "GitLab empty project lists no commits" "$(cat "$reg_dir/gl.log")" "/repository/commits"
+
+# A local clone of a GitLab project links its commits to GitLab
+_reg_init "$reg_dir/glrepo"
+_reg_commit "$reg_dir/glrepo" 2025-01-10 "Recap Tester" "feat: local gitlab commit"
+git -C "$reg_dir/glrepo" remote add origin git@gitlab.example.org:a/b/proj.git
+out=$(HOME="$reg_home" "$GIT_RECAP" -f markdown -m commits -p all -u "Recap Tester" "$reg_dir/glrepo" 2>/dev/null)
+assert_contains "local GitLab clone links commits with /-/commit/" "$out" \
+    "](https://gitlab.example.org/a/b/proj/-/commit/$(git -C "$reg_dir/glrepo" log -1 --format=%h))"
+git -C "$reg_dir/glrepo" remote set-url origin https://github.com/owner/proj.git
+out=$(HOME="$reg_home" "$GIT_RECAP" -f markdown -m commits -p all -u "Recap Tester" "$reg_dir/glrepo" 2>/dev/null)
+assert_contains "local GitHub clone links commits with /commit/" "$out" "](https://github.com/owner/proj/commit/"
+git -C "$reg_dir/glrepo" remote set-url origin git@bitbucket.org:team/proj.git
+out=$(HOME="$reg_home" "$GIT_RECAP" -f markdown -m commits -p all -u "Recap Tester" "$reg_dir/glrepo" 2>"$reg_dir/bb.err")
+assert_contains "local clone from an unsupported host is still read" "$out" "feat: local gitlab commit"
+assert_not_contains "local clone from an unsupported host has no commit links" "$out" "]("
+assert_contains "local clone from an unsupported host is named after its directory" "$(cat "$reg_dir/bb.err")" "Local repo: glrepo"
+err=$(_gl_run -p all https://codeberg.org/a/b 2>&1 >/dev/null)
+assert_eq "remote repo on an unsupported host exits 1" "1" "$?"
+assert_contains "remote repo on an unsupported host is reported" "$err" \
+    "Unsupported host: codeberg.org (git-recap reads GitHub and GitLab repositories; clone it and pass the local path)"
+
+# Live: a public gitlab.com project, read without a token (no glab on PATH).
+# Skipped offline or when gitlab.com cannot be reached.
+gl_live_url="https://gitlab.com/gitlab-org/gitlab-runner"
+if [[ -z "${GIT_RECAP_OFFLINE:-}" ]] && command -v curl &>/dev/null \
+    && curl -sS -f -o /dev/null --max-time 15 "https://gitlab.com/api/v4/projects/gitlab-org%2Fgitlab-runner" 2>/dev/null; then
+    live_bin="$reg_dir/live-bin"
+    mkdir -p "$live_bin"
+    for tool in bash env git jq sed cut tr awk sort uniq wc head tail cat mktemp rm basename date curl; do
+        ln -s "$(command -v "$tool")" "$live_bin/$tool"
+    done
+    out=$(env -u GITLAB_TOKEN -u GL_TOKEN PATH="$live_bin" HOME="$reg_home" \
+        "$GIT_RECAP" --team -f json --since 2025-01-06 --until 2025-01-10 "$gl_live_url" 2>"$reg_dir/live.err")
+    assert_eq "live GitLab public project exits 0" "0" "$?"
+    assert_eq "live GitLab public project lists commits" "true" "$(echo "$out" | jq '.global_stats.total_commits > 0' 2>/dev/null)"
+else
+    TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1))
+    printf '  %s %s\n' "$(_green "PASS")" "live GitLab public project: gitlab.com unreachable or offline (skip)"
+fi
 
 rm -rf "$reg_dir"
 
