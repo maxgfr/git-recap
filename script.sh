@@ -48,6 +48,9 @@ REPO_NAME=""
 REPO_MODE=""  # local or remote
 LOCAL_REPO_DIR=""
 REPO_WEB_URL=""
+REPO_COMMIT_URL=""  # Prefix of commit links (empty without a web URL)
+REPO_PROVIDER=""    # github or gitlab: the API a remote repo is read through
+REPO_HOST=""        # Host of that API (github.com, gitlab.com, a GitLab instance)
 BRANCH=""
 SINCE=""
 UNTIL=""
@@ -157,6 +160,14 @@ _gh_commit_jq() {
         | join("\t")'
 }
 
+# jq program turning a GitLab API commit list into the same rows: each commit
+# is first given the shape _gh_commit_jq reads (no login: the author name is used)
+_gl_commit_jq() {
+    printf '%s' 'map({sha: .id, parents: .parent_ids, author: {},
+        commit: {message: (.message // ""), author: {name: .author_name, date: .authored_date}}}) | '
+    _gh_commit_jq "${1:-}"
+}
+
 # _split_details <n> : stdin = TSV whose field n+1 is the JSON-encoded body.
 # Records bodies in DETAILS_FILE and prints the first n fields.
 _split_details() {
@@ -168,7 +179,7 @@ _split_details() {
             select(length > 0) | split("\t") | {
                 hash: .[0],
                 body: ((.[$n] // "\"\"") | fromjson | gsub("\r"; "") | sub("^\\s+"; "") | sub("\\s+$"; ""))
-            }' >> "$DETAILS_FILE" || die "Could not read commit bodies from the GitHub API response"
+            }' >> "$DETAILS_FILE" || die "Could not read commit bodies from the API response"
     fi
     printf '%s\n' "$raw" | cut -f1-"$n"
 }
@@ -379,11 +390,13 @@ Usage:
 
 # Arguments
 
-  <repo>              GitHub URL, owner/repo, repo name, SSH URL, or local path (.)
+  <repo>              GitHub URL, owner/repo, repo name, SSH URL, GitLab URL
+                      (gitlab.com or self-hosted), or local path (.)
 
 # Options
 
-  -u, --user <user>       GitHub username (auto-detected via gh)
+  -u, --user <user>       GitHub username (auto-detected via gh); for GitLab,
+                          the commit author name or email
   -p, --period <period>   Period (default: current-month). Values:
                           current-month, last-month, current-week, last-week,
                           current-year, last-year, all, <N>, YYYY-MM, YYYY
@@ -454,6 +467,10 @@ Usage:
   git-recap maxgfr/subtool                             # owner/repo
   git-recap https://github.com/maxgfr/subtool          # HTTPS URL
   git-recap git@github.com:maxgfr/subtool.git          # SSH URL
+  git-recap https://gitlab.com/group/project           # GitLab project
+  git-recap https://gitlab.example.org/group/subgroup/project
+                                                       # Self-hosted GitLab, nested
+                                                       # groups (GITLAB_TOKEN if private)
 HELP
 }
 
@@ -571,6 +588,21 @@ detect_github_user() {
     if command -v gh &>/dev/null && login=$(gh api user --jq '.login' 2>/dev/null </dev/null); then
         [[ "$login" =~ ^[A-Za-z0-9_-]+$ ]] && printf '%s\n' "$login"
     fi
+    return 0
+}
+
+# Prints the identity GitLab commits are filtered by (the API matches the
+# author name or email, not a login): the token owner's commit email, email or
+# name, else the global git email, else nothing
+detect_gitlab_user() {
+    local user=""
+    _gitlab_auth
+    if [[ -s "$WORK_DIR/gitlab.auth" ]]; then
+        user=$(_gitlab_get user '[.commit_email, .email, .name] | map(select(. != null and . != "")) | .[0] // empty' \
+            2>/dev/null) || user=""
+    fi
+    [[ -n "$user" ]] || user=$(git config --global user.email 2>/dev/null || true)
+    [[ -n "$user" ]] && printf '%s\n' "$user"
     return 0
 }
 
@@ -712,8 +744,55 @@ compute_period() {
 # Repo resolution
 # ==============================================================================
 
+# _parse_remote_url <url> → "<provider> TAB <host> TAB <path>" for an
+# https://<host>/<path> or git@<host>:<path> URL; fails on anything else.
+# github.com is GitHub, a well-known other forge is "unsupported", and any
+# other host is GitLab (the only two providers).
+_parse_remote_url() {
+    local host path
+    if [[ "$1" =~ ^https://([^/@]+@)?([^/@]+)/(.*)$ ]]; then
+        host="${BASH_REMATCH[2]}" path="${BASH_REMATCH[3]}"
+    elif [[ "$1" =~ ^git@([^:/]+):(.*)$ ]]; then
+        host="${BASH_REMATCH[1]}" path="${BASH_REMATCH[2]}"
+    else
+        return 1
+    fi
+    case "$host" in
+        # Well-known forges that are neither GitHub nor GitLab
+        bitbucket.org|codeberg.org|gitea.com|dev.azure.com|ssh.dev.azure.com|*.visualstudio.com|sourceforge.net)
+            printf 'unsupported\t%s\t%s\n' "$host" "$path"
+            return 0 ;;
+    esac
+    if [[ "$host" == "github.com" ]]; then
+        # Keep owner/repo only: URLs copied from a browser carry /tree/..., /pull/...
+        path=$(printf '%s\n' "$path" | sed -E 's#^([^/]+/[^/]+).*#\1#; s/\.git$//')
+        printf 'github\t%s\t%s\n' "$host" "$path"
+    else
+        # Projects sit in nested groups; GitLab browser URLs put the rest under /-/
+        path="${path%%/-/*}" path="${path%/}" path="${path%.git}"
+        printf 'gitlab\t%s\t%s\n' "$host" "$path"
+    fi
+}
+
+# _is_github_or_local <repo arg> : false for a GitLab or an unsupported host URL
+_is_github_or_local() {
+    local parsed
+    parsed=$(_parse_remote_url "$1") || return 0
+    [[ "$parsed" == github$'\t'* ]]
+}
+
+# _set_web_url : web and commit link URLs of REPO_FULL on REPO_HOST
+_set_web_url() {
+    REPO_WEB_URL="https://${REPO_HOST}/${REPO_FULL}"
+    if [[ "$REPO_PROVIDER" == "gitlab" ]]; then
+        REPO_COMMIT_URL="${REPO_WEB_URL}/-/commit/"
+    else
+        REPO_COMMIT_URL="${REPO_WEB_URL}/commit/"
+    fi
+}
+
 resolve_repo() {
-    local repo="$ARG_REPO"
+    local repo="$ARG_REPO" parsed="" provider host path
 
     # Local path
     if [[ -d "$repo" ]] && git -C "$repo" rev-parse --is-inside-work-tree &>/dev/null; then
@@ -722,19 +801,16 @@ resolve_repo() {
         dir=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die "Could not resolve Git repository root: $repo"
         LOCAL_REPO_DIR="$dir"
         REPO_NAME="$(basename "$dir")"
-        local remote_url
-        remote_url=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
-        case "$remote_url" in
-            https://github.com/*|git@github.com:*)
-                REPO_FULL=$(echo "$remote_url" | sed -E 's#^(https://github\.com/|git@github\.com:)##; s/\.git$//; s#/$##')
-                REPO_NAME="${REPO_FULL##*/}"
-                REPO_WEB_URL="https://github.com/${REPO_FULL}"
-                ;;
-            *)
-                REPO_FULL="$REPO_NAME"
-                REPO_WEB_URL=""
-                ;;
-        esac
+        REPO_FULL="$REPO_NAME"
+        REPO_WEB_URL="" REPO_COMMIT_URL=""
+        # An origin on GitHub or GitLab gives the commits their links
+        parsed=$(_parse_remote_url "$(git -C "$dir" remote get-url origin 2>/dev/null || true)") || parsed=""
+        IFS=$'\t' read -r provider host path <<< "$parsed"
+        if [[ -n "$path" && "$provider" != "unsupported" ]]; then
+            REPO_PROVIDER="$provider" REPO_HOST="$host" REPO_FULL="$path"
+            REPO_NAME="${REPO_FULL##*/}"
+            _set_web_url
+        fi
         info "Local repo: $REPO_FULL"
         return
     fi
@@ -745,30 +821,39 @@ resolve_repo() {
     esac
 
     REPO_MODE="remote"
+    REPO_PROVIDER="github" REPO_HOST="github.com"
 
     local via=""
-    case "$repo" in
-        https://github.com/*|git@github.com:*)
-            # Keep owner/repo only: URLs copied from a browser carry /tree/..., /pull/...
-            repo=$(printf '%s\n' "$repo" | sed -E 's#^(https://github\.com/|git@github\.com:)##; s#^([^/]+/[^/]+).*#\1#; s/\.git$//')
-            ;;
-        */*) ;;
-        *)
-            # repo name only — prefix with username
-            [[ -n "$USER_NAME" ]] || USER_NAME=$(detect_github_user)
-            [[ -n "$USER_NAME" ]] || die "Cannot resolve \"$repo\" without a GitHub user. Use owner/repo or -u"
-            repo="${USER_NAME}/${repo}"
-            via=" (using user: $USER_NAME)"
-            ;;
-    esac
+    if parsed=$(_parse_remote_url "$repo"); then
+        IFS=$'\t' read -r REPO_PROVIDER REPO_HOST repo <<< "$parsed"
+        [[ "$REPO_PROVIDER" != "unsupported" ]] \
+            || die "Unsupported host: $REPO_HOST (git-recap reads GitHub and GitLab repositories; clone it and pass the local path)"
+    else
+        case "$repo" in
+            */*) ;;
+            *)
+                # repo name only — prefix with username
+                [[ -n "$USER_NAME" ]] || USER_NAME=$(detect_github_user)
+                [[ -n "$USER_NAME" ]] || die "Cannot resolve \"$repo\" without a GitHub user. Use owner/repo or -u"
+                repo="${USER_NAME}/${repo}"
+                via=" (using user: $USER_NAME)"
+                ;;
+        esac
+    fi
 
-    # The name goes into API paths: accept what GitHub accepts, nothing else
-    [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
-        || die "Invalid repository: $ARG_REPO (expected owner/repo, a GitHub URL or a local path)"
+    # The name goes into API paths: accept what the provider accepts, nothing else
+    if [[ "$REPO_PROVIDER" == "gitlab" ]]; then
+        [[ "$repo" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$ ]] \
+            || die "Invalid GitLab project: $ARG_REPO (expected https://<host>/<group>/<project>)"
+        via=" (GitLab: $REPO_HOST)"
+    else
+        [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+            || die "Invalid repository: $ARG_REPO (expected owner/repo, a GitHub or GitLab URL, or a local path)"
+    fi
 
     REPO_FULL="$repo"
     REPO_NAME="${REPO_FULL##*/}"
-    REPO_WEB_URL="https://github.com/${REPO_FULL}"
+    _set_web_url
     info "Repo: ${REPO_FULL}${via}"
 }
 
@@ -814,11 +899,14 @@ detect_default_branch() {
             BRANCH=$(git -C "$LOCAL_REPO_DIR" branch --show-current 2>/dev/null || true)
         fi
         [[ -z "$BRANCH" ]] && BRANCH="HEAD"
+    elif [[ "$REPO_PROVIDER" == "gitlab" ]]; then
+        # An empty project has no default branch (and nothing to list)
+        BRANCH=$(_gitlab_get "$(_gl_project)" '.default_branch // empty') || exit 1
     else
         BRANCH=$(_github_get "repos/${REPO_FULL}" '.default_branch') || exit 1
     fi
 
-    info "Branch: $BRANCH"
+    info "Branch: ${BRANCH:-none (empty project)}"
 }
 
 # ==============================================================================
@@ -833,7 +921,10 @@ check_dependencies() {
         command -v jq &>/dev/null || die "jq is required for JSON format"
     fi
 
-    if [[ "${REPO_MODE:-remote}" == "remote" ]]; then
+    if [[ "${REPO_MODE:-remote}" == "remote" && "$REPO_PROVIDER" == "gitlab" ]]; then
+        command -v curl &>/dev/null || die "curl is required for GitLab repos"
+        command -v jq &>/dev/null || die "jq is required for GitLab repos"
+    elif [[ "${REPO_MODE:-remote}" == "remote" ]]; then
         if ! command -v gh &>/dev/null; then
             command -v curl &>/dev/null || die "gh or curl is required for remote repos"
             command -v jq &>/dev/null || die "jq is required when using curl fallback"
@@ -848,13 +939,15 @@ check_dependencies() {
 # Commits travel as TSV: hash, subject, date, plus the author in team mode.
 # Every fetcher takes <mode> ("team" or "") and <fields> (3 or 4).
 
-# _urlencode <string> → percent-encoded query parameter value (byte-wise)
+# _urlencode <string> [all] → percent-encoded query parameter value (byte-wise).
+# With "all", "/" is encoded too, as in a GitLab project id (group%2Fproject).
 _urlencode() {
-    local s="$1" out="" c code hex i
+    local s="$1" keep="/" out="" c code hex i
+    [[ "${2:-}" == "all" ]] && keep=""
     for (( i = 0; i < ${#s}; i++ )); do
         c="${s:i:1}"
         case "$c" in
-            [a-zA-Z0-9._~/-]) out+="$c" ;;
+            [a-zA-Z0-9._~-]|"$keep") out+="$c" ;;
             *)
                 printf -v code '%d' "'$c"
                 printf -v hex '%%%02X' $(( code & 255 ))
@@ -865,10 +958,11 @@ _urlencode() {
     printf '%s' "$out"
 }
 
-# _commits_query <branch> <mode> → query string for the GitHub commits endpoint
+# _commits_query <branch> <mode> [ref parameter] → query string for the commits
+# endpoint (the branch goes in sha= for GitHub, ref_name= for GitLab)
 _commits_query() {
     local query
-    query="sha=$(_urlencode "$1")"
+    query="${3:-sha}=$(_urlencode "$1")"
     [[ "$2" == "team" ]] || query+="&author=$(_urlencode "$USER_NAME")"
     query+="&per_page=100"
     [[ -n "$SINCE" ]] && query+="&since=${SINCE}Z"
@@ -948,11 +1042,33 @@ _github_get() {
     [[ -z "$out" ]] || printf '%s\n' "$out"
 }
 
-# curl backend of _github_get: authenticated with GH_TOKEN / GITHUB_TOKEN when
-# set, follows Link rel="next" pages
-_github_get_curl() {
-    local url="https://api.github.com/$1" filter="$2" status
+# _curl_pages <url> <filter> <API name> <die function> [curl args...] → filtered
+# output of every page of a curl GET, following Link rel="next". A failure goes
+# to <die function> as "<message> (HTTP nnn)"; HTTP 409 (an empty GitHub
+# repository) yields nothing.
+_curl_pages() {
+    local url="$1" filter="$2" api="$3" die_fn="$4" status
     local body="$WORK_DIR/curl.body" headers="$WORK_DIR/curl.headers"
+    shift 4
+    while [[ -n "$url" ]]; do
+        # -g: brackets in a URL are data, not a glob
+        if ! status=$(curl -sS -g -L -o "$body" -D "$headers" -w '%{http_code}' \
+            "$@" "$url" 2>"$WORK_DIR/api.err"); then
+            "$die_fn" "$(cat "$WORK_DIR/api.err")"
+        fi
+        case "$status" in
+            200) ;;
+            409) return 0 ;;
+            *) "$die_fn" "$(jq -r '.message // .error // empty | if type == "string" then . else tojson end' \
+                "$body" 2>/dev/null) (HTTP ${status})" ;;
+        esac
+        jq -r "$filter" "$body" || die "Unexpected response from the $api API: $url"
+        url=$(sed -n 's/.*<\([^>]*\)>; *rel="next".*/\1/p' "$headers" | tr -d '\r')
+    done
+}
+
+# curl backend of _github_get: authenticated with GH_TOKEN / GITHUB_TOKEN when set
+_github_get_curl() {
     local auth="$WORK_DIR/curl.auth" token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
     # The token goes through a header file, so that it never shows in ps
     if [[ -n "$token" ]]; then
@@ -960,39 +1076,77 @@ _github_get_curl() {
     else
         : > "$auth"
     fi
-    while [[ -n "$url" ]]; do
-        # -g: brackets in a URL are data, not a glob
-        if ! status=$(curl -sS -g -L -o "$body" -D "$headers" -w '%{http_code}' \
-            -H "Accept: application/vnd.github+json" -H "@$auth" "$url" 2>"$WORK_DIR/api.err"); then
-            _github_die "$(cat "$WORK_DIR/api.err")"
-        fi
-        case "$status" in
-            200) ;;
-            409) return 0 ;;
-            *) _github_die "$(jq -r '.message // empty' "$body" 2>/dev/null) (HTTP ${status})" ;;
-        esac
-        jq -r "$filter" "$body" || die "Unexpected response from the GitHub API: $url"
-        url=$(sed -n 's/.*<\([^>]*\)>; *rel="next".*/\1/p' "$headers" | tr -d '\r')
-    done
+    _curl_pages "https://api.github.com/$1" "$2" GitHub _github_die \
+        -H "Accept: application/vnd.github+json" -H "@$auth"
 }
 
-_fetch_github() {
-    local mode="$1" fields="$2" filter raw
+# --- GitLab (gitlab.com or a self-hosted instance, REST API v4, curl only) ---
+
+# _gitlab_die <error text> : exit with a readable message for a failed API call
+_gitlab_die() {
+    local err="$1" status=""
+    [[ "$err" =~ \(HTTP\ ([0-9]{3})\) ]] && status="${BASH_REMATCH[1]}"
+    case "$status" in
+        401) die "GitLab rejected the credentials for ${REPO_HOST}. Set GITLAB_TOKEN (scope read_api) or run: glab auth login --hostname ${REPO_HOST}" ;;
+        403|429) die "Access denied (rate limit or permissions): ${REPO_FULL} on ${REPO_HOST}" ;;
+        # GitLab answers 404, not 401, for a private project read without a token
+        404) die "Project not found: ${REPO_FULL} on ${REPO_HOST} (private projects need GITLAB_TOKEN)" ;;
+    esac
+    die "GitLab API error: ${err:-unknown error}"
+}
+
+# _gitlab_auth : writes the auth header file once, empty without a token (public
+# projects need none). Token: GITLAB_TOKEN, GL_TOKEN, then glab's for the host.
+# Bearer, not PRIVATE-TOKEN: it also takes the OAuth tokens glab stores.
+_gitlab_auth() {
+    local auth="$WORK_DIR/gitlab.auth" token="${GITLAB_TOKEN:-${GL_TOKEN:-}}"
+    [[ -f "$auth" ]] && return 0
+    if [[ -z "$token" ]] && command -v glab &>/dev/null; then
+        token=$(glab config get token --host "$REPO_HOST" 2>/dev/null </dev/null || true)
+    fi
+    # The token goes through a header file, so that it never shows in ps
+    if [[ -n "$token" ]]; then
+        (umask 077; printf 'Authorization: Bearer %s\n' "$token" > "$auth")
+    else
+        : > "$auth"
+    fi
+}
+
+# _gl_project → API path of the project (its id is the URL-encoded full path)
+_gl_project() { printf 'projects/%s' "$(_urlencode "$REPO_FULL" all)"; }
+
+# _gitlab_get <path?query> <jq filter> → filtered output of a paginated GitLab
+# API GET. Any failure aborts: a partial result is never returned.
+_gitlab_get() {
+    _gitlab_auth
+    _curl_pages "https://${REPO_HOST}/api/v4/$1" "$2" GitLab _gitlab_die -H "@$WORK_DIR/gitlab.auth"
+}
+
+# _fetch_remote <mode> <fields> : commits of the remote repo through the API of
+# its provider (both list commits newest first, 100 per page)
+_fetch_remote() {
+    local mode="$1" fields="$2" get=_github_get filter base="repos/${REPO_FULL}" ref_param=sha raw
     filter=$(_gh_commit_jq "$mode")
+    if [[ "$REPO_PROVIDER" == "gitlab" ]]; then
+        get=_gitlab_get base="$(_gl_project)/repository" ref_param=ref_name
+        filter=$(_gl_commit_jq "$mode")
+    fi
 
     if [[ "$ARG_ALL_BRANCHES" == true ]]; then
         local branches branch
-        branches=$(_github_get "repos/${REPO_FULL}/branches?per_page=100" '.[].name') || exit 1
+        branches=$("$get" "${base}/branches?per_page=100" '.[].name') || exit 1
         raw=$(
             while IFS= read -r branch; do
                 [[ -z "$branch" ]] && continue
-                _github_get "repos/${REPO_FULL}/commits?$(_commits_query "$branch" "$mode")" "$filter" || exit 1
+                "$get" "${base}/commits?$(_commits_query "$branch" "$mode" "$ref_param")" "$filter" || exit 1
             done <<< "$branches"
         ) || exit 1
         # A commit reachable from several branches is listed once; newest day first
         raw=$(printf '%s\n' "$raw" | awk '!seen[$0]++' | sort -s -t$'\t' -k3,3r)
+    elif [[ -n "$BRANCH" ]]; then
+        raw=$("$get" "${base}/commits?$(_commits_query "$BRANCH" "$mode" "$ref_param")" "$filter") || exit 1
     else
-        raw=$(_github_get "repos/${REPO_FULL}/commits?$(_commits_query "$BRANCH" "$mode")" "$filter") || exit 1
+        raw=""  # An empty GitLab project has no default branch
     fi
 
     printf '%s\n' "$raw" | _split_details "$fields"
@@ -1013,8 +1167,9 @@ fetch_commits() {
     else
         local client="gh api"
         command -v gh &>/dev/null || client="curl"
+        [[ "$REPO_PROVIDER" == "gitlab" ]] && client="gitlab api (${REPO_HOST})"
         info "Fetching ${what} (${client}${suffix})..."
-        commits=$(_fetch_github "$mode" "$fields") || exit 1
+        commits=$(_fetch_remote "$mode" "$fields") || exit 1
     fi
 
     commits=$(printf '%s\n' "$commits" | filter_noise "$fields")
@@ -1148,7 +1303,7 @@ _print_commits_markdown() {
     echo "|------|------|---------|"
     while IFS=$'\t' read -r hash msg date; do
         ref="$hash"
-        [[ -n "$REPO_WEB_URL" ]] && ref="[${hash}](${REPO_WEB_URL}/commit/${hash})"
+        [[ -n "$REPO_COMMIT_URL" ]] && ref="[${hash}](${REPO_COMMIT_URL}${hash})"
         printf '| %s | %s | %s |\n' "$date" "$ref" "${msg//|/\\|}"
     done <<< "$1"
 }
@@ -1586,12 +1741,14 @@ main() {
             USER_NAME="$ARG_USER"
         elif [[ -n "${GIT_RECAP_USER:-}" ]]; then
             USER_NAME="$GIT_RECAP_USER"
-        else
+        elif _is_github_or_local "$ARG_REPO"; then
             USER_NAME=$(detect_local_repo_user || true)
             [[ -z "$USER_NAME" ]] && USER_NAME=$(detect_github_user)
             [[ -n "$USER_NAME" ]] || die "Could not detect GitHub user. Use -u or run --init"
         fi
-        info "User: $USER_NAME"
+        # A GitLab user is detected below, once the GitLab host is known (an
+        # unsupported host is rejected by resolve_repo first)
+        [[ -z "$USER_NAME" ]] || info "User: $USER_NAME"
     fi
 
     # Resolve repo
@@ -1601,6 +1758,12 @@ main() {
     check_dependencies
 
     WORK_DIR=$(mktemp -d)
+
+    if [[ "$ARG_TEAM" == false && -z "$USER_NAME" ]]; then
+        USER_NAME=$(detect_gitlab_user)
+        [[ -n "$USER_NAME" ]] || die "Could not detect the GitLab user. Use -u (commit author name or email) or run --init"
+        info "User: $USER_NAME"
+    fi
 
     # Detect branch
     detect_default_branch
